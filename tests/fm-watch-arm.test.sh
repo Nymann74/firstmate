@@ -1006,6 +1006,67 @@ test_interrupted_away_entry_clears_marker_before_rearm() {
   pass "watch-arm: an interrupted away entry clears its marker and re-arms"
 }
 
+test_interrupted_away_stop_clears_marker_before_rearm() {
+  local dir home state fakebin ready armout stop_pid watcher_pid i
+  dir=$(make_case interrupted-away-stop)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  ready="$dir/stop-clearing"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+
+  # A completed start-native leaves both the away flag and the launch sentinel
+  # for the separate native daemon launch.
+  date '+%s' > "$state/.afk"
+  : > "$state/.afk-launching"
+
+  # Interrupt the stop in the window after it has cleared .afk but before its
+  # own entry_clear runs: the marker it inherited from start-native must still be
+  # cleared by the interrupted-exit cleanup.
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_STOP_CLEARING="$ready" bash -c '
+    . "$1"
+    fm_afk_launch_entry_clear() {
+      if [ ! -e "$FM_STOP_CLEARING" ]; then
+        : > "$FM_STOP_CLEARING"
+        while [ -e "$FM_STOP_CLEARING" ]; do sleep 0.05; done
+      fi
+      rm -f "$FM_AFK_LAUNCHING"
+    }
+    fm_afk_launch_main stop
+  ' _ "$LAUNCH" &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  stop_pid=$!
+  for i in $(seq 1 100); do
+    [ -e "$ready" ] && [ ! -e "$state/.afk" ] && break
+    sleep 0.05
+  done
+  [ -e "$ready" ] && [ ! -e "$state/.afk" ] \
+    || fail "interrupted away stop did not reach the teardown window"
+  kill -TERM "$stop_pid" 2>/dev/null || true
+  wait "$stop_pid" 2>/dev/null || true
+  for i in $(seq 1 100); do
+    [ ! -e "$state/.afk-launching" ] && break
+    sleep 0.05
+  done
+  [ ! -e "$state/.afk-launching" ] \
+    || fail "interrupted away stop retained the launch marker after clearing .afk"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  ARM_PID=$!
+  wait_for_file_text "$armout" 'watcher: started pid=' \
+    || fail "arm did not resume after interrupted away stop: $(cat "$armout" 2>/dev/null)"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$watcher_pid" || fail "rearm after interrupted away stop has no live watcher"
+
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: an interrupted away stop clears its marker and re-arms"
+}
+
 test_legacy_afk_without_daemon_or_entry_still_arms() {
   local dir home state fakebin armout status watcher_pid
   dir=$(make_case legacy-afk-arm)
@@ -1166,6 +1227,7 @@ test_arm_defers_to_a_live_away_daemon
 test_arm_defers_during_away_entry
 test_arm_defers_through_daemon_entry_window
 test_interrupted_away_entry_clears_marker_before_rearm
+test_interrupted_away_stop_clears_marker_before_rearm
 test_legacy_afk_without_daemon_or_entry_still_arms
 test_arm_defers_to_fresh_recorded_away_entry
 test_arm_self_heals_abandoned_away_entry
