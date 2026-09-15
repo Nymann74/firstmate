@@ -1,0 +1,36 @@
+captain_pane=%40
+--- propose ---
+Away posture read-back (proposed, not yet confirmed):
+  entered: 2026-09-15T23:27:50Z
+  expected return: not given
+  spend cap: 4 concurrent workers
+  merge when green (task ids): (none)
+  reach: hold-for-return only. No phone channel is configured; anything that needs you waits for your return.
+  your words (verbatim):
+    away for live singleton validation
+  accepted clauses:
+    (none)
+  refused clauses:
+    (none)
+  everything else waits for your return: no red merge without its named check, no discard without a named object and condition, never credentials, legal, financial, or attended prompts, nothing by analogy, and every clause expires at return.
+  hard rule: forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text; no recorded clause is authority by itself.
+  recorded clauses are held for the return brief and are not executed by this release.
+Say go to confirm; restate any refused clause first if you want it recorded.
+--- confirm ---
+Away posture confirmed at 2026-09-15T23:27:50Z: hold-for-return only. No phone channel is configured; anything that needs you waits for your return. No mandate clauses recorded. Forbidden, destructive, irreversible, and security-sensitive actions are never pre-authorizable regardless of clause text, and no recorded clause is authority by itself. Expected return: not given. Spend cap: 4 concurrent workers.
+--- start ---
+--- ownership before arm ---
+--- settled ownership before arm ---
+daemon_pid=1472174 watcher_pid_before=1472300
+--- extension-equivalent restart arm ---
+watcher: deferred - away-mode daemon owns supervision
+watcher_pid_after=1472300
+--- daemon collision log check ---
+collision_detected=false
+--- real per-wake triage ---
+2:[2026-09-16T01:29:09+0200] wake: signal: /home/pnj/.no-mistakes/worktrees/3189e6653997/01M2KKFR27CA99HY2DK3VHB9TF/.live-away-validation-01M2KKFR27CA99HY2DK3VHB9TF/home/state/live-triage.status
+3:[2026-09-16T01:29:10+0200] self-handle: signal: /home/pnj/.no-mistakes/worktrees/3189e6653997/01M2KKFR27CA99HY2DK3VHB9TF/.live-away-validation-01M2KKFR27CA99HY2DK3VHB9TF/home/state/live-triage.status -> routine signal: live-triage.status: working: live watcher triage signal
+watcher_pid_pre_wake=1472300 watcher_pid_after_triage=1488208
+per_wake_triage=passed
+--- stop ---
+stop_cleanup=passed

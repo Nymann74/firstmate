@@ -1,0 +1,4 @@
+watcher: started pid=1528293 (beacon fresh)
+Terminated                 sleep "$POLL"
+timeout_exit=124
+legacy_bare_afk_arms=passed

@@ -1,0 +1,12 @@
+captain_pane=%42
+--- initial composer state ---
+empty--- seed escalation ---
+--- running-daemon bounded result ---
+b2310d9a3c5558030da2d8ab653b3112	2	1789515051
+captured_typed_digest_lines=2
+8:[2026-09-16T01:30:53+0200] escalate submit cap reached (2/2 typed); alarming instead of retyping the identical digest
+bound_and_wedge=passed
+--- changed buffered digest ---
+a1594cdcbd57cb44501cb0d2e86a2889	2	1789515075
+old_identity=b2310d9a3c5558030da2d8ab653b3112 new_identity=a1594cdcbd57cb44501cb0d2e86a2889 captured_typed_digest_lines=4
+changed_digest_retried_independently=passed
