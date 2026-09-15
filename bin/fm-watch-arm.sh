@@ -2,9 +2,10 @@
 # Safe, home-scoped (re-)arm of the firstmate watcher, with honest verification.
 #
 # The watcher (bin/fm-watch.sh) blocks until it has an actionable wake to
-# surface, then prints one reason line and exits. While state/.afk exists the
-# daemon owns triage and the watcher exits on every wake for the daemon to
-# classify. Reliability depends on arming through a mechanism that SURVIVES the
+# surface, then prints one reason line and exits. While a live away-mode daemon
+# owns supervision, it owns triage and the watcher exits on every wake for the
+# daemon to classify. A legacy state/.afk flag without that daemon still arms
+# normally. Reliability depends on arming through a mechanism that SURVIVES the
 # call and NOTIFIES on exit, so firstmate must run this script as the harness's
 # own tracked background task (e.g. run_in_background), or - for a Claude
 # primary - inside the Stop asyncRewake hook's foreground process tree
@@ -29,7 +30,8 @@
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
 #   watcher: deferred - away-mode daemon owns supervision - a live away-mode daemon
-#                                                          owns the home singleton; this arm
+#                                                          owns the home singleton, or a fresh
+#                                                          entry handoff has priority; this arm
 #                                                          yields without starting or stopping one
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
