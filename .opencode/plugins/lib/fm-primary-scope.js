@@ -22,8 +22,9 @@ function gitDir(root, flag) {
 }
 
 // Return true when root carries a genuine secondmate-home marker. Mirrors
-// fm_root_is_secondmate_home: a regular file (never a symlink) whose first
-// line, with all whitespace removed, is a nonempty [A-Za-z0-9._-] identifier.
+// fm_root_is_secondmate_home: a regular file (never a symlink) whose
+// LF-terminated first line, with only ASCII whitespace removed, is a nonempty
+// [A-Za-z0-9._-] identifier.
 export function fmRootIsSecondmateHome(root) {
   if (!root) return false;
   const marker = `${root}/.fm-secondmate-home`;
@@ -40,8 +41,10 @@ export function fmRootIsSecondmateHome(root) {
   } catch {
     return false;
   }
-  const firstLine = contents.split("\n", 1)[0] ?? "";
-  const id = firstLine.replace(/\s/g, "");
+  const newline = contents.indexOf("\n");
+  if (newline === -1) return false;
+  const firstLine = contents.slice(0, newline);
+  const id = firstLine.replace(/[\t\n\v\f\r ]/g, "");
   if (!id) return false;
   return /^[A-Za-z0-9._-]+$/.test(id);
 }

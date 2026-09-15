@@ -52,11 +52,14 @@ WT_SPACE="$TMP_ROOT/wt-space"
 WT_BANG="$TMP_ROOT/wt-bang"
 WT_SLASH="$TMP_ROOT/wt-slash"
 WT_CRLF="$TMP_ROOT/wt-crlf"
+WT_UNTERMINATED="$TMP_ROOT/wt-unterminated"
+WT_NBSP="$TMP_ROOT/wt-nbsp"
 WT_NO_AGENTS="$TMP_ROOT/wt-no-agents"
 WT_NO_BIN="$TMP_ROOT/wt-no-bin"
 WT_NO_STATE="$TMP_ROOT/wt-no-state"
 for wt in "$WT_NO_MARKER" "$WT_VALID" "$WT_SYMLINK" "$WT_EMPTY" "$WT_WS" \
-  "$WT_SPACE" "$WT_BANG" "$WT_SLASH" "$WT_CRLF" "$WT_NO_AGENTS" "$WT_NO_BIN" "$WT_NO_STATE"; do
+  "$WT_SPACE" "$WT_BANG" "$WT_SLASH" "$WT_CRLF" "$WT_UNTERMINATED" "$WT_NBSP" \
+  "$WT_NO_AGENTS" "$WT_NO_BIN" "$WT_NO_STATE"; do
   make_linked "$wt"
 done
 
@@ -75,6 +78,10 @@ mark "$WT_BANG" 'co!ach
 mark "$WT_SLASH" 'co/ach
 '
 printf 'coach\r\n' > "$WT_CRLF/.fm-secondmate-home"
+# First line with no terminator: Bash read fails at EOF, so the owner rejects.
+printf 'coach' > "$WT_UNTERMINATED/.fm-secondmate-home"
+# U+00A0 NBSP is not LC_ALL=C [[:space:]], so the owner keeps it and rejects.
+printf 'co\302\240ach\n' > "$WT_NBSP/.fm-secondmate-home"
 mark "$WT_NO_AGENTS" 'coach
 '
 rm -f "$WT_NO_AGENTS/AGENTS.md"
@@ -113,6 +120,8 @@ CASES=(
   "linked_bang_marker|$WT_BANG|$WT_BANG/state|false"
   "linked_slash_marker|$WT_SLASH|$WT_SLASH/state|false"
   "linked_crlf_marker|$WT_CRLF|$WT_CRLF/state|true"
+  "linked_unterminated_marker|$WT_UNTERMINATED|$WT_UNTERMINATED/state|false"
+  "linked_nbsp_marker|$WT_NBSP|$WT_NBSP/state|false"
   "linked_missing_agents|$WT_NO_AGENTS|$WT_NO_AGENTS/state|false"
   "linked_missing_bin|$WT_NO_BIN|$WT_NO_BIN/state|false"
   "linked_missing_state|$WT_NO_STATE|$WT_NO_STATE/state|false"
