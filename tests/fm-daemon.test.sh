@@ -2281,7 +2281,9 @@ test_daemon_retires_preexisting_identity_matched_home_watcher() {
   local dir state home watch pid
   dir=$(make_supercase daemon-retire-matched)
   state="$dir/state"; home="$dir/home"; watch="$dir/bin/fm-watch.sh"
-  sleep 300 & pid=$!
+  sleep 300 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  pid=$!
   write_home_watch_lock "$state" "$pid" "$home" "$watch"
 
   run_daemon_retire "$state" "$watch" "$home"
@@ -2297,19 +2299,25 @@ test_daemon_retire_leaves_foreign_or_unmatched_watcher_untouched() {
   dir=$(make_supercase daemon-retire-unmatched)
   state="$dir/state"; home="$dir/home"; watch="$dir/bin/fm-watch.sh"
 
-  sleep 300 & pid=$!
+  sleep 300 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  pid=$!
   write_home_watch_lock "$state" "$pid" "$dir/other-home" "$watch"
   run_daemon_retire "$state" "$watch" "$home"
   is_live_non_zombie "$pid" || fail "a watcher recorded for another home was signalled"
   kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
 
-  sleep 300 & pid=$!
+  sleep 300 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  pid=$!
   write_home_watch_lock "$state" "$pid" "$home" "$dir/other/fm-watch.sh"
   run_daemon_retire "$state" "$watch" "$home"
   is_live_non_zombie "$pid" || fail "a watcher recorded for another watcher path was signalled"
   kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
 
-  sleep 300 & pid=$!
+  sleep 300 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  pid=$!
   write_home_watch_lock "$state" "$pid" "$home" "$watch" "identity-that-cannot-match"
   run_daemon_retire "$state" "$watch" "$home"
   is_live_non_zombie "$pid" || fail "a watcher whose identity does not match the lock was signalled"
@@ -2322,7 +2330,9 @@ test_daemon_retire_never_signals_its_own_watcher_child() {
   local dir state home watch pid
   dir=$(make_supercase daemon-retire-own-child)
   state="$dir/state"; home="$dir/home"; watch="$dir/bin/fm-watch.sh"
-  sleep 300 & pid=$!
+  sleep 300 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  pid=$!
   write_home_watch_lock "$state" "$pid" "$home" "$watch"
 
   run_daemon_retire "$state" "$watch" "$home" "$pid"
@@ -2614,6 +2624,7 @@ test_wedge_alarm_shutdown_stops_active_notifier_group() {
   (
     set -m
     sh -c 'sleep 30 & printf "%s" "$!" > "$1"; wait' sh "$child_file" &
+    # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
     pid=$!
     while [ ! -s "$child_file" ]; do sleep 0.05; done
     child=$(cat "$child_file")

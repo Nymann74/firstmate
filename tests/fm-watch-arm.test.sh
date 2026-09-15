@@ -869,6 +869,7 @@ test_arm_defers_to_a_live_away_daemon() {
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper" > "$state/.supervise-daemon.lock/pid-identity" ) \
     || fail "could not record the fake away-daemon identity"
 
+  # shellcheck disable=SC2031 # reads the caller's resolved value; the subshell does not reassign it.
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1
   status=$?
@@ -876,6 +877,7 @@ test_arm_defers_to_a_live_away_daemon() {
   grep -F 'watcher: deferred - away-mode daemon owns supervision' "$armout" >/dev/null \
     || fail "arm did not report the away-daemon deferral: $(cat "$armout")"
   is_live_non_zombie "$SEED_PID" || fail "arm displaced the daemon's live watcher"
+  # shellcheck disable=SC2031 # reads the caller's resolved value; the subshell does not reassign it.
   [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$SEED_PID" ] \
     || fail "arm changed the watcher singleton while the daemon owned supervision"
 
@@ -972,6 +974,7 @@ test_interrupted_away_entry_clears_marker_before_rearm() {
     }
     fm_afk_launch_main start
   ' _ "$LAUNCH" &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   launcher_pid=$!
   for i in $(seq 1 100); do
     [ -e "$ready" ] && [ -e "$state/.afk-launching" ] && break
@@ -990,6 +993,7 @@ test_interrupted_away_entry_clears_marker_before_rearm() {
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   ARM_PID=$!
   wait_for_file_text "$armout" 'watcher: started pid=' \
     || fail "arm did not resume after interrupted away entry: $(cat "$armout" 2>/dev/null)"
@@ -1014,6 +1018,7 @@ test_legacy_afk_without_daemon_or_entry_still_arms() {
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   ARM_PID=$!
   wait_for_file_text "$armout" 'watcher: started pid=' \
     || fail "legacy .afk without a daemon did not arm: $(cat "$armout" 2>/dev/null)"
@@ -1059,6 +1064,7 @@ test_arm_self_heals_abandoned_away_entry() {
 
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   ARM_PID=$!
   wait_for_file_text "$armout" 'watcher: started pid=' \
     || fail "arm did not resume after an abandoned away-entry sentinel: $(cat "$armout" 2>/dev/null)"
@@ -1092,6 +1098,7 @@ test_arm_self_heal_respects_max_override() {
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_AFK_LAUNCHING_MAX_SECS=notanumber \
     FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   ARM_PID=$!
   wait_for_file_text "$armout" 'watcher: started pid=' \
     || fail "invalid FM_AFK_LAUNCHING_MAX_SECS did not fall back to the default: $(cat "$armout" 2>/dev/null)"
@@ -1115,18 +1122,21 @@ test_arm_defers_to_stale_sentinel_with_live_daemon() {
   date '+%s' > "$state/.afk"
   echo $(( $(date +%s) - 10000 )) > "$state/.afk-launching"
   sleep 300 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
   sleeper=$!
   mkdir -p "$state/.supervise-daemon.lock"
   printf '%s\n' "$sleeper" > "$state/.supervise-daemon.lock/pid"
   ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper" > "$state/.supervise-daemon.lock/pid-identity" ) \
     || fail "could not record the fake away-daemon identity"
 
+  # shellcheck disable=SC2031 # reads the caller's resolved value; the subshell does not reassign it.
   PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
     FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1
   status=$?
   expect_code 0 "$status" "an arm must defer to a live daemon even with a stale sentinel"
   grep -F 'watcher: deferred - away-mode daemon owns supervision' "$armout" >/dev/null \
     || fail "stale sentinel with a live daemon did not defer: $(cat "$armout")"
+  # shellcheck disable=SC2031 # reads the caller's resolved value; the subshell does not reassign it.
   [ -e "$state/.afk-launching" ] || fail "a stale sentinel was cleaned while a live daemon owned supervision"
   is_live_non_zombie "$SEED_PID" || fail "arm displaced the daemon's watcher"
 
