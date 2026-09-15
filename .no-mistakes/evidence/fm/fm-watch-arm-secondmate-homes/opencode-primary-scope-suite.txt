@@ -1,0 +1,1 @@
+ok - OpenCode root predicate admits valid secondmate homes, rejects foreign roots, and mirrors bin/fm-primary-scope-lib.sh

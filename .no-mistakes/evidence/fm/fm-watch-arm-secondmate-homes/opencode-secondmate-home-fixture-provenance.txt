@@ -1,0 +1,25 @@
+=== Fixture provenance for the post-fix product harness ===
+--- linked-valid ---
+root=/tmp/fm-secondmate-lab/wt-linked-valid
+git-dir=/tmp/fm-secondmate-lab/base/.git/worktrees/wt-linked-valid  git-common-dir=/tmp/fm-secondmate-lab/base/.git
+marker type: regular file
+marker bytes:    c   o   a   c   h  \n 
+--- linked-no-marker ---
+root=/tmp/fm-secondmate-lab/wt-linked-no-marker
+git-dir=/tmp/fm-secondmate-lab/base/.git/worktrees/wt-linked-no-marker  git-common-dir=/tmp/fm-secondmate-lab/base/.git
+marker type: (absent)
+--- linked-symlink ---
+root=/tmp/fm-secondmate-lab/wt-linked-symlink
+git-dir=/tmp/fm-secondmate-lab/base/.git/worktrees/wt-linked-symlink  git-common-dir=/tmp/fm-secondmate-lab/base/.git
+marker type: symlink -> /tmp/fm-secondmate-lab/wt-linked-symlink/.real-marker
+marker bytes:    c   o   a   c   h  \n 
+--- linked-unterminated ---
+root=/tmp/fm-secondmate-lab/wt-linked-unterminated
+git-dir=/tmp/fm-secondmate-lab/base/.git/worktrees/wt-linked-unterminated  git-common-dir=/tmp/fm-secondmate-lab/base/.git
+marker type: regular file
+marker bytes:    c   o   a   c   h 
+--- linked-nbsp ---
+root=/tmp/fm-secondmate-lab/wt-linked-nbsp
+git-dir=/tmp/fm-secondmate-lab/base/.git/worktrees/wt-linked-nbsp  git-common-dir=/tmp/fm-secondmate-lab/base/.git
+marker type: regular file
+marker bytes:    c   o 302 240   a   c   h  \n 

@@ -1,0 +1,9 @@
+=== Real bin/fm-test-run.sh changed-file suite selection (isolated fixture) ===
+
+--- changed: .opencode/plugins/lib/fm-primary-scope.js ---
+tests/fm-opencode-primary-scope.test.sh
+tests/fm-pi-watch-extension.test.sh
+
+--- changed: .opencode/plugins/fm-primary-watch-arm.js ---
+tests/fm-opencode-primary-scope.test.sh
+tests/fm-pi-watch-extension.test.sh

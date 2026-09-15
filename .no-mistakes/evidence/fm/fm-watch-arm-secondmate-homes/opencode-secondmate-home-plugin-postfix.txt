@@ -1,0 +1,6 @@
+linked-valid   marker=valid        status=armed        armed=yes
+linked-no-marker marker=none         status=not-primary  armed=no
+linked-symlink marker=symlink      status=not-primary  armed=no
+linked-unterminated marker=unterminated status=not-primary  armed=no
+linked-nbsp    marker=nbsp         status=not-primary  armed=no
+ok - production OpenCode watch-arm plugin arms a marked secondmate linked worktree and rejects unmarked/malformed ones

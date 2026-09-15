@@ -1,0 +1,2 @@
+linked-valid   marker=valid        status=not-primary  armed=no
+not ok - linked-valid: expected the plugin to arm, but no arm log was written (status=not-primary)
