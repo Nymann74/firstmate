@@ -69,8 +69,8 @@ mark "$WT_SYMLINK" 'coach
 '
 ln -sfn "$WT_VALID/.fm-secondmate-home" "$WT_SYMLINK/.fm-secondmate-home"
 : > "$WT_EMPTY/.fm-secondmate-home"
-mark "$WT_WS" '   
-'
+# First line is only ASCII spaces, which strip to empty, so the owner rejects.
+printf '\040\040\040\n' > "$WT_WS/.fm-secondmate-home"
 mark "$WT_SPACE" 'co ach
 '
 mark "$WT_BANG" 'co!ach
