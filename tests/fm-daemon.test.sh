@@ -2252,6 +2252,72 @@ test_escalate_flush_changed_buffer_resets_the_attempt_bound() {
   pass "escalate_flush: a changed buffer is a new identity and is never blocked by the prior cap"
 }
 
+# A proven pre-typing transport failure (the backend's send-failed verdict)
+# means the literal text never landed, so it is a deferral, not a typed attempt.
+run_transport_failed_flush() {  # <dir> <state> <flushes> <cap>
+  local dir=$1 state=$2 flushes=$3 cap=$4 i
+  local calls="$dir/submits.log"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf 'transport\n' >> "$calls"; printf 'send-failed'; }
+    i=0
+    while [ "$i" -lt "$flushes" ]; do
+      i=$((i + 1))
+      FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+        FM_ESCALATE_SUBMIT_MAX_ATTEMPTS="$cap" FM_ESCALATE_SUBMIT_INFLIGHT_SECS=0 \
+        escalate_flush "$state" >/dev/null 2>&1 || true
+    done
+  )
+}
+
+test_escalate_flush_prettyping_send_failure_consumes_no_attempt_budget() {
+  local dir state sent
+  dir=$(make_retry_case bounded-retry-prefailure)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: pick D"
+  afk_enter "$state"
+  # More flushes than the cap: a proven pre-typing failure must consume no
+  # budget, so the transport is invoked every time and nothing is capped away.
+  run_transport_failed_flush "$dir" "$state" 4 1
+  sent=$(wc -l < "$dir/submits.log" | tr -d ' ')
+  [ "$sent" -eq 4 ] || fail "pre-typing send failures consumed attempt budget (transport invoked $sent times, expected 4)"
+  [ ! -e "$state/.subsuper-escalations.attempt" ] || fail "a pre-typing send failure left an attempt claim"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "a pre-typing send failure wrongly raised the wedge alarm"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer was dropped after pre-typing send failures"
+  pass "escalate_flush: a proven pre-typing send failure consumes no attempt budget"
+}
+
+# The attempt count must be durable before the irreversible type, so a TERM
+# between the type and a later persist cannot lose it and exceed the cap.
+# The stub snapshots the record from inside the backend invocation itself.
+test_escalate_flush_durably_claims_attempt_before_typing() {
+  local dir state snapshot recorded
+  dir=$(make_retry_case bounded-retry-claim-before-type)
+  state="$dir/state"
+  snapshot="$dir/attempt-at-type"
+  escalate_add "$state" "needs-decision: pick E"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() {
+      cp "$state/.subsuper-escalations.attempt" "$snapshot" 2>/dev/null || true
+      printf 'unknown'
+    }
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+      FM_ESCALATE_SUBMIT_MAX_ATTEMPTS=3 FM_ESCALATE_SUBMIT_INFLIGHT_SECS=0 \
+      escalate_flush "$state" >/dev/null 2>&1 || true
+  )
+  recorded=$(awk -F'\t' '{print $2}' "$snapshot" 2>/dev/null)
+  [ "$recorded" = 1 ] || fail "attempt was not durably claimed before the type (record at type: ${recorded:-none})"
+  recorded=$(awk -F'\t' '{print $2}' "$state/.subsuper-escalations.attempt" 2>/dev/null)
+  [ "$recorded" = 1 ] || fail "typed-but-unconfirmed attempt count was not persisted (${recorded:-none})"
+  pass "escalate_flush: the attempt is durably claimed before the irreversible type"
+}
+
 # --- away-entry watcher retirement (2026-09-10 collision incident) ----------
 # If an extension arm's watcher is already live when /afk is entered, the daemon
 # must retire that home watcher before it forks its own child; otherwise the two
@@ -3043,6 +3109,8 @@ test_max_defer_afk_inactive_does_not_flush_or_alarm
 test_escalate_flush_caps_identical_digest_attempts_and_alarms
 test_escalate_flush_suppresses_retype_while_attempt_is_in_flight
 test_escalate_flush_changed_buffer_resets_the_attempt_bound
+test_escalate_flush_prettyping_send_failure_consumes_no_attempt_budget
+test_escalate_flush_durably_claims_attempt_before_typing
 test_daemon_retires_preexisting_identity_matched_home_watcher
 test_daemon_retire_leaves_foreign_or_unmatched_watcher_untouched
 test_daemon_retire_never_signals_its_own_watcher_child

@@ -739,9 +739,12 @@ escalate_add() {  # <state> <distilled-item>
 # FM_ESCALATE_SUBMIT_INFLIGHT_SECS suppresses a re-type; once the count reaches
 # FM_ESCALATE_SUBMIT_MAX_ATTEMPTS the flush raises the wedge alarm instead of
 # typing again. A changed buffer yields a new identity and resets the count, so
-# newly buffered escalations are never blocked. inject_msg's return code
+# newly buffered escalations are never blocked. The attempt is claimed (count
+# written) BEFORE the irreversible type, so a TERM mid-type cannot lose it; a
+# proven pre-typing deferral rolls the claim back. inject_msg's return code
 # distinguishes a real typed-but-unconfirmed submit (dedup applies) from a
-# pre-typing deferral (busy/pending/pane-gone/afk-off: nothing typed, no dedup).
+# pre-typing deferral (busy/pending/pane-gone/afk-off/send-failed: nothing typed,
+# no dedup).
 escalate_flush() {  # <state>
   local state=$1 buf item n msg identity attempt_file prev_identity attempts last now cap window rc oldest
   buf="$state/.subsuper-escalations"
@@ -780,6 +783,11 @@ escalate_flush() {  # <state>
     log "escalate submit attempt plausibly in flight ($((now - last))s < ${window}s); not retyping the identical digest"
     return 1
   fi
+  # Durably claim the attempt BEFORE the irreversible type. A TERM between the
+  # type and any later persist must not lose the count, or a restart could type
+  # the identical digest past the cap. A proven pre-typing deferral (rc=3) rolls
+  # the claim back below, so it consumes no attempt budget.
+  printf '%s\t%s\t%s\n' "$identity" "$((attempts + 1))" "$now" > "$attempt_file"
   rc=0
   inject_msg "$msg" "$state" || rc=$?
   case "$rc" in
@@ -789,10 +797,15 @@ escalate_flush() {  # <state>
       return 0 ;;
     3)
       # Deferred before typing anything: no in-flight payload to dedup against,
-      # so let the caller retry freely (the guard will defer again until safe).
+      # so consume no budget. Restore this identity's prior record, or drop the
+      # claim when there was none.
+      if [ "$prev_identity" = "$identity" ]; then
+        printf '%s\t%s\t%s\n' "$identity" "$attempts" "$last" > "$attempt_file"
+      else
+        rm -f "$attempt_file"
+      fi
       return 1 ;;
     *)
-      printf '%s\t%s\t%s\n' "$identity" "$((attempts + 1))" "$now" > "$attempt_file"
       log "escalate submit unconfirmed ($((attempts + 1))/${cap} typed); preserving buffer for bounded retry"
       return 1 ;;
   esac
@@ -1307,8 +1320,9 @@ window_for_task() {  # <task-key> [state]
 # --- injection --------------------------------------------------------------
 # inject_msg: send one escalation digest to the supervisor pane.
 # Returns 0 on a confirmed submit, 3 when it deferred WITHOUT typing anything
-# (afk inactive, pane gone, supervisor busy, or composer not confirmed-empty),
-# and 1 when it typed the digest but could not confirm the submit. The 1-versus-3
+# (afk inactive, pane gone, supervisor busy, composer not confirmed-empty, or a
+# proven pre-typing transport send-failed), and 1 when it typed the digest but
+# could not confirm the submit. The 1-versus-3
 # split is what lets escalate_flush apply its bounded submit dedup only to a real
 # typed attempt; a bare deferral has no in-flight payload to protect. On any
 # non-zero the caller preserves the buffer so the escalation survives for the
@@ -1378,9 +1392,17 @@ inject_msg() {  # <message> [state]
   retries=${FM_INJECT_CONFIRM_RETRIES:-$INJECT_CONFIRM_RETRIES_DEFAULT}
   sleep_s=${FM_INJECT_CONFIRM_SLEEP:-$INJECT_CONFIRM_SLEEP_DEFAULT}
   verdict=$(fm_backend_send_text_submit "$backend" "$target" "$msg" "$retries" "$sleep_s" "$sleep_s")
-  if [ "$verdict" = empty ]; then
-    return 0  # Backend confirmed the submit.
-  fi
+  case "$verdict" in
+    empty)
+      return 0 ;;  # Backend confirmed the submit.
+    send-failed)
+      # The backend's proof-carrying failure verdict: the literal text never
+      # landed in the composer, so this is a pre-typing deferral, not a typed
+      # attempt. Returning 3 keeps it out of the caller's bounded submit dedup,
+      # which exists only to bound REAL typed attempts.
+      log "inject deferred: transport could not type the digest (verdict=send-failed)"
+      return 3 ;;
+  esac
   log "inject failed: submit unconfirmed after $retries retries (verdict=$verdict, text may be in composer)"
   return 1
 }
