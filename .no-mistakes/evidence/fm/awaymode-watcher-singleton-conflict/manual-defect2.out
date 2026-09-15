@@ -1,0 +1,24 @@
+### A. cap fallback default (FM_ESCALATE_SUBMIT_MAX_ATTEMPTS=unset), window 0, 6 flushes
+typed=3
+buffer_alive=yes
+wedge_marker=yes
+attempt_record=6d72688688c539501c36f9865661bde7 3 1789506491
+
+### B. in-flight window suppresses retype (cap 9, window 9999, 4 flushes)
+typed=1
+buffer_alive=yes
+wedge_marker=no
+attempt_record=6d72688688c539501c36f9865661bde7 1 1789506491
+
+### C. changed buffer is a new identity (cap 1, window 0)
+after_same_digest typed=1
+after_new_digest typed=2
+
+### D. pre-typing deferral (afk inactive) does not consume the budget
+/tmp/fm-manual-escalate.6KHMtG/pretype/drive: line 10: /tmp/fm-manual-escalate.6KHMtG/pretype/submits.log: No such file or directory
+PRETYPE typed_before_afk=
+PRETYPE attempt_file_present=no
+typed=3
+buffer_alive=yes
+wedge_marker=yes
+attempt_record=6d72688688c539501c36f9865661bde7 3 1789506492

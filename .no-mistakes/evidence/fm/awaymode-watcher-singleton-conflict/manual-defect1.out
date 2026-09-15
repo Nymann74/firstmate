@@ -1,0 +1,13 @@
+### 1. live identity-matched away daemon + live identity-matched home watcher
+arm rc=0
+arm stdout/stderr: watcher: deferred - away-mode daemon owns supervision
+watcher lock pid before=3713217 after=3713217
+RESULT: PASS - arm deferred and did not displace the live daemon-owned watcher
+
+### 2. adversarial: daemon gone but its stale lock remains
+legacy arm rc=0 (dead daemon pid=3713231)
+legacy arm line: watcher: started pid=3713401 (beacon fresh)
+RESULT: PASS - dead daemon lock does not defer; arm reached the watcher path
+
+### 3. adversarial: matching .afk but a FOREIGN watcher lock (other home)
+RESULT: PASS - foreign-home watcher was NOT signalled by retirement
