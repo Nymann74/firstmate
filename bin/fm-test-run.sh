@@ -1457,6 +1457,7 @@ families_for_changed_path() {
       # suite pins the predicate with no live harness; the live e2e proves the
       # real TUI arming path end to end.
       printf '%s\n' __script__:fm-opencode-primary-scope.test.sh
+      printf '%s\n' __script__:fm-pi-watch-extension.test.sh
       printf '%s\n' live-harness-optin
       ;;
     bin/fm-extension.mjs|bin/fm-extension.sh|docs/examples/process-event-extension/*)
