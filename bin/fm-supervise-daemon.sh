@@ -728,6 +728,21 @@ escalate_add() {  # <state> <distilled-item>
   printf '%s\n' "$item" >> "$buf"
 }
 
+# _persist_attempt_record <file> <identity> <attempts> <last>
+# Atomically write the bounded-submit attempt record (temp file + rename) and
+# read it back to confirm it carries the intended identity and count. Returns
+# non-zero when the record cannot be written or verified, so a caller about to
+# type an irreversible submit can fail closed instead of leaving no/garbled
+# record for the next flush to read as zero attempts.
+_persist_attempt_record() {
+  local file=$1 identity=$2 attempts=$3 last=$4 got_identity got_attempts got_last
+  local tmp="$file.$$"
+  printf '%s\t%s\t%s\n' "$identity" "$attempts" "$last" > "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$file" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  IFS=$(printf '\t') read -r got_identity got_attempts got_last < "$file" 2>/dev/null || return 1
+  [ "$got_identity" = "$identity" ] && [ "$got_attempts" = "$attempts" ] && [ "$got_last" = "$last" ]
+}
+
 # Flush the escalation buffer as ONE batched, single-line digest to the
 # supervisor pane. Returns 0 on successful inject (or empty buffer), non-zero on
 # inject failure (buffer preserved for retry / catch-up).
@@ -786,8 +801,13 @@ escalate_flush() {  # <state>
   # Durably claim the attempt BEFORE the irreversible type. A TERM between the
   # type and any later persist must not lose the count, or a restart could type
   # the identical digest past the cap. A proven pre-typing deferral (rc=3) rolls
-  # the claim back below, so it consumes no attempt budget.
-  printf '%s\t%s\t%s\n' "$identity" "$((attempts + 1))" "$now" > "$attempt_file"
+  # the claim back below, so it consumes no attempt budget. If the claim cannot
+  # be recorded, fail closed and do not type: an unbounded typed submit is worse
+  # than a deferred escalation.
+  if ! _persist_attempt_record "$attempt_file" "$identity" "$((attempts + 1))" "$now"; then
+    log "error: could not record escalation submit attempt; deferring without typing"
+    return 1
+  fi
   rc=0
   inject_msg "$msg" "$state" || rc=$?
   case "$rc" in
@@ -800,7 +820,7 @@ escalate_flush() {  # <state>
       # so consume no budget. Restore this identity's prior record, or drop the
       # claim when there was none.
       if [ "$prev_identity" = "$identity" ]; then
-        printf '%s\t%s\t%s\n' "$identity" "$attempts" "$last" > "$attempt_file"
+        _persist_attempt_record "$attempt_file" "$identity" "$attempts" "$last" || true
       else
         rm -f "$attempt_file"
       fi
@@ -1671,6 +1691,19 @@ fm_daemon_retire_pre_existing_watcher() {  # <state> <watch-path> <home> [own-ch
   done
 }
 
+# fm_daemon_take_over_watcher_output <state> <watch-path> <home> [own-child-pid] [tmpdir]
+# Gate the away-daemon watcher takeover on the child-launch prerequisites:
+# allocate the child's output temp file FIRST, and only then retire a
+# pre-existing identity-matched home watcher. If the temp file cannot be created
+# (unavailable/full TMPDIR) no watcher is signalled, so a failed allocation can
+# never leave the home with no watcher at all. Echoes the allocated path.
+fm_daemon_take_over_watcher_output() {  # <state> <watch-path> <home> [own-child-pid] [tmpdir]
+  local state=$1 watch=$2 home=$3 own_child=${4:-} tmpdir=${5:-${TMPDIR:-/tmp}} tmp
+  tmp=$(mktemp "$tmpdir/fm-watch.XXXXXX") || return 1
+  fm_daemon_retire_pre_existing_watcher "$state" "$watch" "$home" "$own_child"
+  printf '%s\n' "$tmp"
+}
+
 # ============================================================================
 # Everything below runs only when the script is EXECUTED, not sourced. The pure
 # classifiers above are sourceable for unit tests (tests/fm-daemon.test.sh).
@@ -1842,8 +1875,8 @@ fm_super_main() {
   }
 
   start_watcher() {
-    fm_daemon_retire_pre_existing_watcher "$STATE" "$WATCH" "$FM_HOME" "${WATCHER_PID:-}"
-    CUR_TMP=$(mktemp "${TMPDIR:-/tmp}/fm-watch.XXXXXX") || { log "error: mktemp failed; retrying in 5s"; sleep 5; return 1; }
+    CUR_TMP=$(fm_daemon_take_over_watcher_output "$STATE" "$WATCH" "$FM_HOME" "${WATCHER_PID:-}") \
+      || { log "error: mktemp failed; retrying in 5s"; sleep 5; return 1; }
     "$WATCH" >"$CUR_TMP" 2>>"$WATCH_ERR" &
     WATCHER_PID=$!
   }

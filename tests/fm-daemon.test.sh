@@ -2187,14 +2187,14 @@ make_retry_case() {  # <name> -> echoes dir; state + submits.log
 }
 
 # Shared stub set for a herdr pane that is safe to type into but never confirms.
-run_unconfirmed_flush() {  # <dir> <state> <flushes> <cap> <window>
-  local dir=$1 state=$2 flushes=$3 cap=$4 window=$5 i
+run_unconfirmed_flush() {  # <dir> <state> <flushes> <cap> <window> [verdict]
+  local dir=$1 state=$2 flushes=$3 cap=$4 window=$5 verdict=${6:-unknown} i
   local calls="$dir/submits.log"
   (
     fm_backend_target_exists() { return 0; }
     pane_is_busy() { return 1; }
     fm_backend_composer_state() { printf 'empty'; }
-    fm_backend_send_text_submit() { printf 'typed\n' >> "$calls"; printf 'unknown'; }
+    fm_backend_send_text_submit() { printf 'typed\n' >> "$calls"; printf '%s' "$verdict"; }
     i=0
     while [ "$i" -lt "$flushes" ]; do
       i=$((i + 1))
@@ -2217,6 +2217,22 @@ test_escalate_flush_caps_identical_digest_attempts_and_alarms() {
   [ -s "$state/.subsuper-escalations" ] || fail "capped digest buffer was dropped instead of preserved"
   [ -s "$state/.subsuper-inject-wedged" ] || fail "cap did not raise the wedge alarm marker"
   pass "escalate_flush: an unconfirmed identical digest is typed at most the cap, then alarms"
+}
+
+# A literal send that succeeded but whose Enter transport never reached the pane
+# must be bounded like any other typed attempt, never mistaken for a deferral.
+test_escalate_flush_posttyping_enter_failure_counts_attempts() {
+  local dir state typed
+  dir=$(make_retry_case bounded-retry-enter-failure)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: pick F"
+  afk_enter "$state"
+  run_unconfirmed_flush "$dir" "$state" 5 2 0 pending
+  typed=$(wc -l < "$dir/submits.log" | tr -d ' ')
+  [ "$typed" -eq 2 ] || fail "a post-literal Enter failure was typed $typed times; expected the cap of 2"
+  [ -s "$state/.subsuper-escalations" ] || fail "post-literal Enter-failure buffer was dropped"
+  [ -s "$state/.subsuper-inject-wedged" ] || fail "post-literal Enter failure did not reach the cap and alarm"
+  pass "escalate_flush: a post-literal Enter failure is bounded like any typed attempt"
 }
 
 test_escalate_flush_suppresses_retype_while_attempt_is_in_flight() {
@@ -2318,6 +2334,31 @@ test_escalate_flush_durably_claims_attempt_before_typing() {
   pass "escalate_flush: the attempt is durably claimed before the irreversible type"
 }
 
+# If the attempt claim cannot be recorded, the daemon must not type: an
+# unbounded typed submit is worse than a deferred, preserved escalation.
+test_escalate_flush_unrecordable_claim_fails_closed() {
+  local dir state
+  dir=$(make_retry_case bounded-retry-unrecordable)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: pick G"
+  afk_enter "$state"
+  # Occupy the attempt-record path with a directory so the atomic rename cannot
+  # produce a verifiable record.
+  mkdir -p "$state/.subsuper-escalations.attempt"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf 'typed\n' >> "$dir/submits.log"; printf 'empty'; }
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+      FM_ESCALATE_SUBMIT_MAX_ATTEMPTS=3 FM_ESCALATE_SUBMIT_INFLIGHT_SECS=0 \
+      escalate_flush "$state" >/dev/null 2>&1 || true
+  )
+  [ ! -s "$dir/submits.log" ] || fail "an unrecordable attempt claim still typed the digest"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer was dropped when the claim could not be recorded"
+  pass "escalate_flush: an unrecordable attempt claim fails closed without typing"
+}
+
 # --- away-entry watcher retirement (2026-09-10 collision incident) ----------
 # If an extension arm's watcher is already live when /afk is entered, the daemon
 # must retire that home watcher before it forks its own child; otherwise the two
@@ -2340,6 +2381,15 @@ run_daemon_retire() {  # <state> <watch-path> <home> [own-child-pid]
     # shellcheck source=bin/fm-wake-lib.sh
     . "$ROOT/bin/fm-wake-lib.sh"
     fm_daemon_retire_pre_existing_watcher "$state" "$watch" "$home" "$own"
+  )
+}
+
+run_daemon_take_over() {  # <state> <watch-path> <home> [own-child-pid] [tmpdir]
+  local state=$1 watch=$2 home=$3 own=${4:-} tmpdir=${5:-${TMPDIR:-/tmp}}
+  (
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_daemon_take_over_watcher_output "$state" "$watch" "$home" "$own" "$tmpdir"
   )
 }
 
@@ -2405,6 +2455,28 @@ test_daemon_retire_never_signals_its_own_watcher_child() {
   is_live_non_zombie "$pid" || fail "the daemon's own watcher child was signalled"
   kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
   pass "daemon: the daemon's own watcher child is never signalled by retirement"
+}
+
+# Child-launch prerequisites gate the takeover: if the watcher output file
+# cannot be allocated, no existing watcher may be retired, or the home would be
+# left with no watcher at all (the daemon keeps running, so extension arms
+# benignly defer).
+test_daemon_unavailable_tmpdir_keeps_existing_watcher() {
+  local dir state home watch pid tmpdir out rc
+  dir=$(make_supercase daemon-takeover-tmpdir-unavailable)
+  state="$dir/state"; home="$dir/home"; watch="$dir/bin/fm-watch.sh"
+  tmpdir="$dir/absent-tmpdir"
+  sleep 300 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  pid=$!
+  write_home_watch_lock "$state" "$pid" "$home" "$watch"
+
+  out=$(run_daemon_take_over "$state" "$watch" "$home" "" "$tmpdir"); rc=$?
+  [ "$rc" -ne 0 ] || fail "watcher take-over should fail when the output temp dir is unavailable"
+  [ -z "$out" ] || fail "watcher take-over echoed a path despite the temp dir being unavailable"
+  is_live_non_zombie "$pid" || fail "an unavailable TMPDIR retired the existing home watcher"
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+  pass "daemon: an unavailable TMPDIR fails the take-over before retiring the existing watcher"
 }
 
 # --- backend-independent active wedge alert ---------------------------------
@@ -3107,13 +3179,16 @@ test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_nothing
 test_max_defer_afk_inactive_does_not_flush_or_alarm
 test_escalate_flush_caps_identical_digest_attempts_and_alarms
+test_escalate_flush_posttyping_enter_failure_counts_attempts
 test_escalate_flush_suppresses_retype_while_attempt_is_in_flight
 test_escalate_flush_changed_buffer_resets_the_attempt_bound
 test_escalate_flush_prettyping_send_failure_consumes_no_attempt_budget
 test_escalate_flush_durably_claims_attempt_before_typing
+test_escalate_flush_unrecordable_claim_fails_closed
 test_daemon_retires_preexisting_identity_matched_home_watcher
 test_daemon_retire_leaves_foreign_or_unmatched_watcher_untouched
 test_daemon_retire_never_signals_its_own_watcher_child
+test_daemon_unavailable_tmpdir_keeps_existing_watcher
 test_wedge_alarm_library_mode_defaults_to_discard
 test_wake_helpers_replace_inherited_notifier_override
 test_wedge_alarm_discard_seam_fires_nothing
