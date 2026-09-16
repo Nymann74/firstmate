@@ -285,7 +285,7 @@ family_for_basename() {
     fm-harness-precedence.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-rovo-harness.test.sh|fm-agy-harness.test.sh|fm-omp-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
     fm-lint-workflows.test.sh|\
-    fm-operational-input.test.sh|fm-pi-primary-types.test.sh|\
+    fm-operational-input.test.sh|fm-opencode-primary-scope.test.sh|fm-pi-primary-types.test.sh|\
     fm-harness-adapter-references.test.sh|\
     fm-send-popup-settle.test.sh|fm-send-settle.test.sh|\
     fm-subagent-pretool-check.test.sh|\
@@ -1449,6 +1449,15 @@ families_for_changed_path() {
       # context-reset stdout injection) only show up against a real harness.
       printf '%s\n' __script__:fm-pi-windows-shell-invocation.test.sh
       printf '%s\n' session-bootstrap
+      printf '%s\n' live-harness-optin
+      ;;
+    .opencode/plugins/fm-primary-watch-arm.js|.opencode/plugins/lib/fm-primary-scope.js)
+      # The OpenCode watch-arm plugin's root-eligibility predicate and its
+      # cross-language mirror of bin/fm-primary-scope-lib.sh. The portable
+      # suite pins the predicate with no live harness; the live e2e proves the
+      # real TUI arming path end to end.
+      printf '%s\n' __script__:fm-opencode-primary-scope.test.sh
+      printf '%s\n' __script__:fm-pi-watch-extension.test.sh
       printf '%s\n' live-harness-optin
       ;;
     bin/fm-extension.mjs|bin/fm-extension.sh|docs/examples/process-event-extension/*)
