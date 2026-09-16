@@ -248,8 +248,10 @@ print_blockers() {  # <file>
 
 clear_delivery_artifacts() {
   rm -f \
+    "$STATE/.afk-launching" \
     "$STATE/.subsuper-escalations" \
     "$STATE/.subsuper-escalations.since" \
+    "$STATE/.subsuper-escalations.attempt" \
     "$STATE/.subsuper-inject-wedged"
 }
 

@@ -179,10 +179,14 @@ Without overrides, backend detection uses `$TMUX_PANE` first, then `HERDR_ENV=1`
 That keeps a tmux pane nested inside herdr on the tmux transport, matching the runtime backend's innermost-first rule.
 Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
+`FM_ESCALATE_SUBMIT_MAX_ATTEMPTS` (default 3) caps how many times one identical buffered digest may be typed with no confirmed submit before the daemon stops retyping and raises the wedge alarm instead.
+`FM_ESCALATE_SUBMIT_INFLIGHT_SECS` (default 30) is how long an unconfirmed typed submit is treated as plausibly in flight, during which the identical digest is not re-typed.
+A changed escalation buffer is a new digest identity and resets the count, so new escalations are never blocked.
+`FM_AFK_LAUNCHING_MAX_SECS` (default 300) bounds the `state/.afk-launching` away-entry sentinel: a marker older than this is treated as abandoned and removed only when no live identity-matched daemon owns supervision, so a `start-native` entry whose separate native daemon launch never ran cannot suppress arming forever.
 
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
-When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.
+When away-mode injection cannot confirm a submit past `FM_MAX_DEFER_SECS` or the bounded typed-attempt cap is reached, the sub-supervisor raises a loud, rate-limited alarm.
 Beyond the durable `state/.subsuper-inject-wedged` marker and the tmux status-line flash, it attempts a configured backend-independent active alert that can reach the captain even when every pane and its backend status-line is unreadable.
 `config/wedge-alarm` (local, gitignored) lists channel directives, one per non-empty, non-comment line; every listed non-`off` channel fires, best-effort.
 `FM_WEDGE_ALARM_CHANNEL` overrides the file with a single directive.
@@ -1096,6 +1100,10 @@ FM_SUPERVISOR_TARGET=              # optional supervisor pane target override; t
 FM_INJECT_SKIP=heartbeat           # |-prefixes force-self-handled bypassing classification; empty disables
 FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digests; 0 = flush immediately
 FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables
+FM_ESCALATE_SUBMIT_MAX_ATTEMPTS=3    # hard cap on typed submit attempts for one identical buffered digest before the daemon raises the wedge alarm instead of retyping; invalid or zero uses 3
+FM_ESCALATE_SUBMIT_INFLIGHT_SECS=30  # seconds an unconfirmed typed submit is treated as plausibly in flight, during which the identical digest is not re-typed; invalid uses 30
+FM_AFK_LAUNCHING_MAX_SECS=300 # seconds before the state/.afk-launching away-entry sentinel is treated as abandoned; ignored/removed only when no live identity-matched away daemon owns supervision so a stranded start-native entry cannot suppress arming forever; invalid or zero uses 300
+FM_DAEMON_RETIRE_WAIT=50    # tenths of a second the daemon waits for a pre-existing identity-matched home watcher to release the watch lock after TERM before it forks its own child; invalid uses 50
 FM_WEDGE_ALARM_CHANNEL=            # override config/wedge-alarm with one active-alert directive for the wedge alarm; off|auto|osascript|herdr|command:<cmd>; absent = auto (macOS -> an OS notification)
 FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascript, herdr, command:) through this command as `<cmd> <channel> <summary>`; "discard" fires nothing; unset in production; the daemon defaults it to "discard" when sourced so no test posts a real notification (docs/wedge-alarm.md)
 FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, herdr, override, or command: notifier before its watchdog terminates it and continues to the next channel; invalid or zero values use 10

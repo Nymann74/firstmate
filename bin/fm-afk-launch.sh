@@ -106,6 +106,7 @@ fi
 FM_AFK_LAUNCH_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 FM_AFK_LAUNCH_RECORD="$FM_AFK_LAUNCH_STATE/.afk-daemon-terminal"
 FM_AFK_LAUNCH_LOCK="$FM_AFK_LAUNCH_STATE/.afk-launch.lock"
+FM_AFK_LAUNCHING="$FM_AFK_LAUNCH_STATE/.afk-launching"
 FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
 
 # shellcheck source=bin/fm-backend.sh
@@ -126,6 +127,22 @@ set +e
 FM_AFK_CONTRACT_CMD="$FM_AFK_LAUNCH_DIR/fm-afk-contract.sh"
 
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
+
+fm_afk_launch_entry_mark() {
+  local pending
+  pending=$(mktemp "$FM_AFK_LAUNCH_STATE/.afk-launching.XXXXXX") || return 1
+  if ! printf '%s\n' "$(date '+%s')" > "$pending" \
+    || ! chmod 0600 "$pending" \
+    || ! mv -f "$pending" "$FM_AFK_LAUNCHING"; then
+    rm -f "$pending"
+    return 1
+  fi
+  FM_AFK_LAUNCH_ENTRY_MARKED=1
+}
+
+fm_afk_launch_entry_clear() {
+  rm -f "$FM_AFK_LAUNCHING"
+}
 
 fm_afk_launch_lock_owned() {
   local pid expected actual
@@ -181,6 +198,16 @@ fm_afk_launch_lock_release() {
   pid=$(cat "$FM_AFK_LAUNCH_LOCK/pid" 2>/dev/null || true)
   [ "$pid" = "$$" ] || return 0
   rm -rf "$FM_AFK_LAUNCH_LOCK"
+}
+
+fm_afk_launch_exit_cleanup() {
+  local result=0
+  if [ "${FM_AFK_LAUNCH_COMPLETED:-}" != 1 ] \
+    && [ "${FM_AFK_LAUNCH_ENTRY_MARKED:-}" = 1 ]; then
+    fm_afk_launch_entry_clear || result=1
+  fi
+  fm_afk_launch_lock_release || result=1
+  return "$result"
 }
 
 fm_afk_launch_usage() {
@@ -448,13 +475,15 @@ fm_afk_launch_reconcile() {
 fm_afk_launch_restore_backup() {  # <backup> <had-afk>
   local backup=$1 had_afk=$2 artifact result=0
   rm -f "$FM_AFK_LAUNCH_STATE/.afk" \
+    "$FM_AFK_LAUNCHING" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.since" \
+    "$FM_AFK_LAUNCH_STATE/.subsuper-escalations.attempt" \
     "$FM_AFK_LAUNCH_STATE/.subsuper-inject-wedged" || result=1
   if [ "$had_afk" -eq 1 ]; then
     cp "$backup/.afk" "$FM_AFK_LAUNCH_STATE/.afk" || result=1
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+  for artifact in .afk-launching .subsuper-escalations .subsuper-escalations.since .subsuper-escalations.attempt .subsuper-inject-wedged; do
     if [ -e "$backup/$artifact" ]; then
       cp -p "$backup/$artifact" "$FM_AFK_LAUNCH_STATE/$artifact" || result=1
     fi
@@ -578,7 +607,7 @@ fm_afk_launch_start() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+  for artifact in .afk-launching .subsuper-escalations .subsuper-escalations.since .subsuper-escalations.attempt .subsuper-inject-wedged; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
@@ -594,7 +623,10 @@ fm_afk_launch_start() {
     fi
   fi
   if [ "$result" -eq 0 ]; then
-    if ! fm_afk_launch_flag_write; then
+    if ! fm_afk_launch_entry_mark; then
+      fm_afk_launch_log "failed to mark away-mode launch in progress"
+      result=1
+    elif ! fm_afk_launch_flag_write; then
       fm_afk_launch_log "failed to write away-mode flag"
       result=1
     fi
@@ -614,6 +646,7 @@ fm_afk_launch_start() {
     fm_afk_launch_restore_backup "$backup" "$had_afk" || result=1
   else
     rm -rf "$backup" || result=1
+    fm_afk_launch_entry_clear || fm_afk_launch_log "failed to clear away-mode launch marker"
   fi
   return "$result"
 }
@@ -635,7 +668,7 @@ fm_afk_launch_start_native() {
     had_afk=1
     cp "$FM_AFK_LAUNCH_STATE/.afk" "$backup/.afk" || { rm -rf "$backup"; return 1; }
   fi
-  for artifact in .subsuper-escalations .subsuper-escalations.since .subsuper-inject-wedged; do
+  for artifact in .afk-launching .subsuper-escalations .subsuper-escalations.since .subsuper-escalations.attempt .subsuper-inject-wedged; do
     if [ -e "$FM_AFK_LAUNCH_STATE/$artifact" ]; then
       cp -p "$FM_AFK_LAUNCH_STATE/$artifact" "$backup/$artifact" || { rm -rf "$backup"; return 1; }
     fi
@@ -644,6 +677,9 @@ fm_afk_launch_start_native() {
   if [ "$result" -eq 0 ]; then
     if ! fm_afk_clear_stale_artifacts "$FM_AFK_LAUNCH_STATE"; then
       fm_afk_launch_log "failed to clear stale away-mode artifacts"
+      result=1
+    elif ! fm_afk_launch_entry_mark; then
+      fm_afk_launch_log "failed to mark away-mode launch in progress"
       result=1
     elif ! fm_afk_launch_flag_write; then
       result=1
@@ -668,6 +704,7 @@ fm_afk_launch_stop() {
     fm_afk_launch_log "malformed daemon terminal record; refusing to stop away mode"
     return 1
   fi
+  FM_AFK_LAUNCH_ENTRY_MARKED=1
   # (1) SIGTERM the daemon so its cleanup trap flushes buffered escalations
   # WHILE state/.afk is still present (the exit-ordering fix: clearing .afk
   # first would make that flush a no-op via inject_msg's presence gate).
@@ -706,6 +743,9 @@ fm_afk_launch_stop() {
   if ! rm -f "$FM_AFK_LAUNCH_STATE/.afk"; then
     fm_afk_launch_log "failed to clear away-mode flag"
     result=1
+  elif ! fm_afk_launch_entry_clear; then
+    fm_afk_launch_log "failed to clear away-mode launch marker"
+    result=1
   fi
   if [ "$result" -eq 0 ] && fm_afk_contract_present "$FM_AFK_LAUNCH_STATE"; then
     if archived=$("$FM_AFK_CONTRACT_CMD" archive); then
@@ -725,12 +765,14 @@ fm_afk_launch_stop() {
 
 fm_afk_launch_main() {
   local result
+  FM_AFK_LAUNCH_COMPLETED=0
+  FM_AFK_LAUNCH_ENTRY_MARKED=0
   # Traps first, lock second. Acquiring before the handlers exist leaves a
   # window where a signal terminates this process by default action and leaks
   # the lock directory, which then blocks the next away-mode launch until the
   # stale-owner reclaim path clears it. fm_afk_launch_lock_release only removes
   # a lock this process owns, so arming it before acquisition is safe.
-  trap fm_afk_launch_lock_release EXIT
+  trap fm_afk_launch_exit_cleanup EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
   fm_afk_launch_lock_acquire || return 1
@@ -745,6 +787,7 @@ fm_afk_launch_main() {
     *) fm_afk_launch_usage >&2; return 2 ;;
   esac
   result=$?
+  FM_AFK_LAUNCH_COMPLETED=1
   fm_afk_launch_lock_release || result=1
   trap - EXIT INT TERM
   return "$result"

@@ -173,7 +173,7 @@ unit_stop_archives_the_record_last() {
 }
 
 # ---------------------------------------------------------------------------
-# UNIT 1: fm_afk_clear_stale_artifacts removes exactly the three stale artifacts.
+# UNIT 1: fm_afk_clear_stale_artifacts removes stale away-mode artifacts.
 # ---------------------------------------------------------------------------
 unit_clear_stale() {
   local st
@@ -181,6 +181,8 @@ unit_clear_stale() {
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
   : > "$st/state/.subsuper-escalations.since"
+  : > "$st/state/.subsuper-escalations.attempt"
+  : > "$st/state/.afk-launching"
   : > "$st/state/.subsuper-inject-wedged"
   : > "$st/state/.wake-queue"          # durable queue must be untouched
   # Source fm-afk-start.sh inside a child bash (it sets `set -eu` and would
@@ -189,10 +191,16 @@ unit_clear_stale() {
     bash -c '. "$1"; fm_afk_clear_stale_artifacts "$2"' _ "$START" "$st/state"
   if [ ! -e "$st/state/.subsuper-escalations" ] \
      && [ ! -e "$st/state/.subsuper-escalations.since" ] \
+     && [ ! -e "$st/state/.subsuper-escalations.attempt" ] \
      && [ ! -e "$st/state/.subsuper-inject-wedged" ]; then
-    pass "clear-stale: removes escalations buffer, sidecar, and wedge marker"
+    pass "clear-stale: removes stale away-mode delivery artifacts"
   else
     fail "clear-stale: stale artifacts survived"
+  fi
+  if [ -e "$st/state/.afk-launching" ]; then
+    pass "clear-stale: preserves the away-entry sentinel until the daemon is live"
+  else
+    fail "clear-stale: dropped the away-entry sentinel before the daemon was live"
   fi
   if [ -e "$st/state/.wake-queue" ]; then
     pass "clear-stale: leaves the durable wake-queue intact (no pending work dropped)"
@@ -544,7 +552,11 @@ unit_signal_exits_with_lock_cleanup() {
   marker="$st/resumed"
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
-    fm_afk_launch_start() { sleep 30; }
+    fm_afk_launch_start() {
+      fm_afk_launch_entry_mark || return 1
+      date "+%s" > "$FM_AFK_LAUNCH_STATE/.afk"
+      sleep 30
+    }
     fm_afk_launch_main start
     : > "$2"
   ' _ "$LAUNCH" "$marker" &
@@ -567,10 +579,11 @@ unit_signal_exits_with_lock_cleanup() {
     [ -e "$st/state/.afk-launch.lock" ] || break
     sleep 0.05
   done
-  if [ ! -e "$marker" ] && [ ! -e "$st/state/.afk-launch.lock" ]; then
-    pass "launcher signal: TERM exits and releases the lifecycle lock"
+  if [ ! -e "$marker" ] && [ ! -e "$st/state/.afk-launch.lock" ] \
+    && [ ! -e "$st/state/.afk-launching" ]; then
+    pass "launcher signal: TERM clears the entry marker and releases the lifecycle lock"
   else
-    fail "launcher signal: interrupted lifecycle resumed or retained its lock"
+    fail "launcher signal: interrupted lifecycle resumed or retained entry state"
   fi
   rm -rf "$st"
 }
@@ -743,13 +756,14 @@ unit_native_lifecycle() {
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
     && [ "$(cut -f1 "$st/state/.afk-daemon-terminal")" = none ] \
     && [ -e "$st/state/.afk" ] \
+    && [ -e "$st/state/.afk-launching" ] \
     && [ ! -e "$st/state/.subsuper-escalations" ]; then
     pass "native lifecycle: launcher owns state with no terminal"
   else
     fail "native lifecycle: state preparation or no-terminal record failed"
   fi
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" stop >/dev/null 2>&1
-  if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
+  if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-launching" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
     pass "native lifecycle: uniform stop clears state without closing a terminal"
   else
     fail "native lifecycle: uniform stop retained state"

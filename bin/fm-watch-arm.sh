@@ -2,9 +2,10 @@
 # Safe, home-scoped (re-)arm of the firstmate watcher, with honest verification.
 #
 # The watcher (bin/fm-watch.sh) blocks until it has an actionable wake to
-# surface, then prints one reason line and exits. While state/.afk exists the
-# daemon owns triage and the watcher exits on every wake for the daemon to
-# classify. Reliability depends on arming through a mechanism that SURVIVES the
+# surface, then prints one reason line and exits. While a live away-mode daemon
+# owns supervision, it owns triage and the watcher exits on every wake for the
+# daemon to classify. A legacy state/.afk flag without that daemon still arms
+# normally. Reliability depends on arming through a mechanism that SURVIVES the
 # call and NOTIFIES on exit, so firstmate must run this script as the harness's
 # own tracked background task (e.g. run_in_background), or - for a Claude
 # primary - inside the Stop asyncRewake hook's foreground process tree
@@ -28,6 +29,10 @@
 #   watcher: started pid=<N> (beacon fresh)              - it launched one and confirmed it
 #   watcher: attached pid=<N> (beacon <age>s)            - a live+fresh successor holds the lock;
 #                                                          this arm attaches and follows it
+#   watcher: deferred - away-mode daemon owns supervision - a live away-mode daemon
+#                                                          owns the home singleton, or a fresh
+#                                                          entry handoff has priority; this arm
+#                                                          yields without starting or stopping one
 #   watcher: FAILED - no live watcher with a fresh beacon  - could not confirm one
 #   watcher: FAILED - cycle ended without an actionable reason
 #                                                        - a clean cycle ended with no wake and no
@@ -405,6 +410,19 @@ if [ "$mode" = handling-delivered ]; then
     && fm_watcher_lock_matches_pid "$STATE" "$WATCH" "$handling_watcher_pid" "$FM_HOME" \
     && fm_recovery_marker_begin_handling "$STATE/.watcher-down" "$handling_generation"
   exit $?
+fi
+
+# Away-mode ownership gate. While a live, identity-matched away-mode daemon
+# holds this home's daemon lock, ITS watcher child is the one singleton for the
+# home: the daemon runs bin/fm-watch.sh one-shot and restarts it on every wake.
+# An arm that stopped that child (--restart) or forked a competitor would
+# displace per-wake triage and leave only the catch-all scan, with the daemon's
+# restarted children colliding on the held lock. Defer without touching the lock
+# or starting a child. A live daemon or an in-progress daemon launch owns this
+# handoff; a legacy flag with neither still arms normally.
+if fm_afk_daemon_owns_supervision "$STATE" || fm_afk_launch_in_progress "$STATE"; then
+  echo "watcher: deferred - away-mode daemon owns supervision"
+  exit 0
 fi
 
 if [ "$mode" = restart ]; then

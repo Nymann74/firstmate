@@ -19,6 +19,8 @@ set -u
 WATCH="$ROOT/bin/fm-watch.sh"
 WATCH_ARM="$ROOT/bin/fm-watch-arm.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+LAUNCH="$ROOT/bin/fm-afk-launch.sh"
+START="$ROOT/bin/fm-afk-start.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-arm-tests)
 
@@ -841,6 +843,371 @@ test_arm_refuses_an_unusable_launch_confirm_window() {
   pass "watch-arm: an unusable launch confirm window refuses to arm by name"
 }
 
+# The away-mode ownership handover: while a live, identity-matched away-mode
+# daemon owns supervision, its own one-shot watcher child is the home's ONE
+# singleton (docs/watcher-continuity.md "Arm-layer cycle contract"). A
+# --restart arm must yield without displacing it, so per-wake triage keeps
+# running through the daemon instead of collapsing to the collision/backoff path.
+test_arm_defers_to_a_live_away_daemon() {
+  local dir home state fakebin out armout status sleeper
+  dir=$(make_case away-daemon-deferral)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+
+  start_seed_watcher "$state" "$fakebin" "$out"
+
+  # A live away-mode daemon: state/.afk plus an identity-matched daemon lock.
+  date '+%s' > "$state/.afk"
+  sleep 300 &
+  sleeper=$!
+  mkdir -p "$state/.supervise-daemon.lock"
+  printf '%s\n' "$sleeper" > "$state/.supervise-daemon.lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper" > "$state/.supervise-daemon.lock/pid-identity" ) \
+    || fail "could not record the fake away-daemon identity"
+
+  # shellcheck disable=SC2031 # reads the caller's resolved value; the subshell does not reassign it.
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1
+  status=$?
+  expect_code 0 "$status" "an arm deferring to a live away daemon must exit cleanly"
+  grep -F 'watcher: deferred - away-mode daemon owns supervision' "$armout" >/dev/null \
+    || fail "arm did not report the away-daemon deferral: $(cat "$armout")"
+  is_live_non_zombie "$SEED_PID" || fail "arm displaced the daemon's live watcher"
+  # shellcheck disable=SC2031 # reads the caller's resolved value; the subshell does not reassign it.
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$SEED_PID" ] \
+    || fail "arm changed the watcher singleton while the daemon owned supervision"
+
+  kill "$SEED_PID" 2>/dev/null || true
+  wait "$SEED_PID" 2>/dev/null || true
+  kill "$sleeper" 2>/dev/null || true
+  wait "$sleeper" 2>/dev/null || true
+  pass "watch-arm: --restart defers to a live away-mode daemon without displacing its watcher"
+}
+
+test_arm_defers_during_away_entry() {
+  local dir home state fakebin out armout status
+  dir=$(make_case away-entry-deferral)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+  start_seed_watcher "$state" "$fakebin" "$out"
+  date '+%s' > "$state/.afk"
+  : > "$state/.afk-launching"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1
+  status=$?
+  expect_code 0 "$status" "an arm must yield while away-mode entry is in progress"
+  grep -F 'watcher: deferred - away-mode daemon owns supervision' "$armout" >/dev/null \
+    || fail "arm did not report the away-entry deferral: $(cat "$armout")"
+  is_live_non_zombie "$SEED_PID" || fail "entry-window arm displaced the existing watcher"
+  [ "$(cat "$state/.watch.lock/pid" 2>/dev/null || true)" = "$SEED_PID" ] \
+    || fail "entry-window arm changed the watcher singleton"
+
+  kill "$SEED_PID" 2>/dev/null || true
+  wait "$SEED_PID" 2>/dev/null || true
+  pass "watch-arm: --restart defers during away-mode entry without displacing its watcher"
+}
+
+test_arm_defers_through_daemon_entry_window() {
+  local dir home state fakebin armout status
+  dir=$(make_case daemon-entry-window)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+
+  # The launcher prepares state/.afk plus the away-entry launching sentinel
+  # before it starts the daemon terminal. Run the REAL daemon entry (its
+  # non-prepared path) with a no-op daemon so its stale-artifact clear is
+  # exercised; that clear must not drop the sentinel before a daemon owns
+  # supervision, or an arm firing in this window would displace the daemon's
+  # watcher. The sentinel is owned by the launcher and cleared by the daemon
+  # after it takes the lock.
+  date '+%s' > "$state/.afk"
+  : > "$state/.afk-launching"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    FM_AFK_DAEMON=/bin/true
+    fm_afk_start_main
+  ' _ "$START" >/dev/null 2>&1 \
+    || fail "daemon entry did not run to completion"
+  [ -e "$state/.afk-launching" ] \
+    || fail "daemon entry dropped the away-entry sentinel before the daemon was live"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1
+  status=$?
+  expect_code 0 "$status" "an arm must yield while the daemon entry window is open"
+  grep -F 'watcher: deferred - away-mode daemon owns supervision' "$armout" >/dev/null \
+    || fail "arm did not report the entry-window deferral: $(cat "$armout")"
+  [ ! -e "$state/.watch.lock/pid" ] \
+    || fail "entry-window arm started a watcher instead of yielding"
+  pass "watch-arm: an arm defers through the daemon entry window until the daemon is live"
+}
+
+test_interrupted_away_entry_clears_marker_before_rearm() {
+  local dir home state fakebin ready armout launcher_pid watcher_pid i
+  dir=$(make_case interrupted-away-entry)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  ready="$dir/entry-ready"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_ENTRY_READY="$ready" bash -c '
+    . "$1"
+    fm_afk_launch_start() {
+      fm_afk_launch_entry_mark || return 1
+      date "+%s" > "$FM_AFK_LAUNCH_STATE/.afk"
+      : > "$FM_ENTRY_READY"
+      sleep 30
+    }
+    fm_afk_launch_main start
+  ' _ "$LAUNCH" &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  launcher_pid=$!
+  for i in $(seq 1 100); do
+    [ -e "$ready" ] && [ -e "$state/.afk-launching" ] && break
+    sleep 0.05
+  done
+  [ -e "$ready" ] && [ -e "$state/.afk-launching" ] \
+    || fail "interrupted away entry did not publish its launch marker"
+  kill -TERM "$launcher_pid" 2>/dev/null || true
+  wait "$launcher_pid" 2>/dev/null || true
+  for i in $(seq 1 100); do
+    [ ! -e "$state/.afk-launching" ] && break
+    sleep 0.05
+  done
+  [ ! -e "$state/.afk-launching" ] \
+    || fail "interrupted away entry retained its launch marker"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  ARM_PID=$!
+  wait_for_file_text "$armout" 'watcher: started pid=' \
+    || fail "arm did not resume after interrupted away entry: $(cat "$armout" 2>/dev/null)"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$watcher_pid" || fail "rearm after interrupted away entry has no live watcher"
+
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: an interrupted away entry clears its marker and re-arms"
+}
+
+test_interrupted_away_stop_clears_marker_before_rearm() {
+  local dir home state fakebin ready armout stop_pid watcher_pid i
+  dir=$(make_case interrupted-away-stop)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  ready="$dir/stop-clearing"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+
+  # A completed start-native leaves both the away flag and the launch sentinel
+  # for the separate native daemon launch.
+  date '+%s' > "$state/.afk"
+  : > "$state/.afk-launching"
+
+  # Interrupt the stop in the window after it has cleared .afk but before its
+  # own entry_clear runs: the marker it inherited from start-native must still be
+  # cleared by the interrupted-exit cleanup.
+  FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_STOP_CLEARING="$ready" bash -c '
+    . "$1"
+    fm_afk_launch_entry_clear() {
+      if [ ! -e "$FM_STOP_CLEARING" ]; then
+        : > "$FM_STOP_CLEARING"
+        while [ -e "$FM_STOP_CLEARING" ]; do sleep 0.05; done
+      fi
+      rm -f "$FM_AFK_LAUNCHING"
+    }
+    fm_afk_launch_main stop
+  ' _ "$LAUNCH" &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  stop_pid=$!
+  for i in $(seq 1 100); do
+    [ -e "$ready" ] && [ ! -e "$state/.afk" ] && break
+    sleep 0.05
+  done
+  [ -e "$ready" ] && [ ! -e "$state/.afk" ] \
+    || fail "interrupted away stop did not reach the teardown window"
+  kill -TERM "$stop_pid" 2>/dev/null || true
+  wait "$stop_pid" 2>/dev/null || true
+  for i in $(seq 1 100); do
+    [ ! -e "$state/.afk-launching" ] && break
+    sleep 0.05
+  done
+  [ ! -e "$state/.afk-launching" ] \
+    || fail "interrupted away stop retained the launch marker after clearing .afk"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  ARM_PID=$!
+  wait_for_file_text "$armout" 'watcher: started pid=' \
+    || fail "arm did not resume after interrupted away stop: $(cat "$armout" 2>/dev/null)"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$watcher_pid" || fail "rearm after interrupted away stop has no live watcher"
+
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: an interrupted away stop clears its marker and re-arms"
+}
+
+test_legacy_afk_without_daemon_or_entry_still_arms() {
+  local dir home state fakebin armout status watcher_pid
+  dir=$(make_case legacy-afk-arm)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  mkdir -p "$home/data"
+  date '+%s' > "$state/.afk"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  ARM_PID=$!
+  wait_for_file_text "$armout" 'watcher: started pid=' \
+    || fail "legacy .afk without a daemon did not arm: $(cat "$armout" 2>/dev/null)"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$watcher_pid" || fail "legacy .afk did not start a live watcher"
+
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: a legacy .afk without daemon ownership still arms"
+}
+
+# The away-entry sentinel records its creation epoch and self-heals once it is
+# older than FM_AFK_LAUNCHING_MAX_SECS with no live daemon: a stranded
+# start-native entry must not suppress arming forever, while a fresh sentinel and
+# a live daemon keep deferring.
+test_arm_defers_to_fresh_recorded_away_entry() {
+  local dir home state fakebin armout status
+  dir=$(make_case away-entry-fresh)
+  home="$dir/home"; state="$dir/state"; fakebin="$dir/fakebin"; armout="$dir/arm.out"
+  mkdir -p "$home/data"
+  date '+%s' > "$state/.afk"
+  date '+%s' > "$state/.afk-launching"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1
+  status=$?
+  expect_code 0 "$status" "an arm must yield to a fresh recorded away-entry sentinel"
+  grep -F 'watcher: deferred - away-mode daemon owns supervision' "$armout" >/dev/null \
+    || fail "arm did not defer to the fresh away-entry sentinel: $(cat "$armout")"
+  [ -e "$state/.afk-launching" ] || fail "a fresh away-entry sentinel was dropped instead of deferring"
+  [ ! -e "$state/.watch.lock/pid" ] || fail "fresh-entry arm started a watcher instead of yielding"
+  pass "watch-arm: a fresh away-entry sentinel defers the arm"
+}
+
+test_arm_self_heals_abandoned_away_entry() {
+  local dir home state fakebin armout watcher_pid
+  dir=$(make_case away-entry-abandoned)
+  home="$dir/home"; state="$dir/state"; fakebin="$dir/fakebin"; armout="$dir/arm.out"
+  mkdir -p "$home/data"
+  date '+%s' > "$state/.afk"
+  echo $(( $(date +%s) - 10000 )) > "$state/.afk-launching"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  ARM_PID=$!
+  wait_for_file_text "$armout" 'watcher: started pid=' \
+    || fail "arm did not resume after an abandoned away-entry sentinel: $(cat "$armout" 2>/dev/null)"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$watcher_pid" || fail "self-healed arm has no live watcher"
+  [ ! -e "$state/.afk-launching" ] || fail "abandoned away-entry sentinel was not cleaned"
+
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: an abandoned away-entry sentinel self-heals and the arm arms"
+}
+
+test_arm_self_heal_respects_max_override() {
+  local dir home state fakebin armout watcher_pid
+  dir=$(make_case away-entry-override)
+  home="$dir/home"; state="$dir/state"; fakebin="$dir/fakebin"; armout="$dir/arm.out"
+  mkdir -p "$home/data"
+  date '+%s' > "$state/.afk"
+  echo $(( $(date +%s) - 10000 )) > "$state/.afk-launching"
+
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_AFK_LAUNCHING_MAX_SECS=999999 \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1
+  expect_code 0 "$?" "an arm must defer while a valid long bound covers the sentinel age"
+  grep -F 'watcher: deferred - away-mode daemon owns supervision' "$armout" >/dev/null \
+    || fail "valid FM_AFK_LAUNCHING_MAX_SECS override did not defer: $(cat "$armout")"
+  [ -e "$state/.afk-launching" ] || fail "valid override cleaned a still-covered sentinel"
+
+  : > "$armout"
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_AFK_LAUNCHING_MAX_SECS=notanumber \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  ARM_PID=$!
+  wait_for_file_text "$armout" 'watcher: started pid=' \
+    || fail "invalid FM_AFK_LAUNCHING_MAX_SECS did not fall back to the default: $(cat "$armout" 2>/dev/null)"
+  watcher_pid=$(cat "$state/.watch.lock/pid" 2>/dev/null || true)
+  is_live_non_zombie "$watcher_pid" || fail "invalid-override arm has no live watcher"
+  [ ! -e "$state/.afk-launching" ] || fail "invalid override did not self-heal the stale sentinel"
+
+  kill "$watcher_pid" 2>/dev/null || true
+  wait "$watcher_pid" 2>/dev/null || true
+  wait "$ARM_PID" 2>/dev/null || true
+  pass "watch-arm: a valid bound override defers and an invalid value falls back to the default"
+}
+
+test_arm_defers_to_stale_sentinel_with_live_daemon() {
+  local dir home state fakebin out armout sleeper status
+  dir=$(make_case away-entry-stale-daemon)
+  home="$dir/home"; state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; armout="$dir/arm.out"
+  mkdir -p "$home/data"
+  start_seed_watcher "$state" "$fakebin" "$out"
+  date '+%s' > "$state/.afk"
+  echo $(( $(date +%s) - 10000 )) > "$state/.afk-launching"
+  sleep 300 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  sleeper=$!
+  mkdir -p "$state/.supervise-daemon.lock"
+  printf '%s\n' "$sleeper" > "$state/.supervise-daemon.lock/pid"
+  ( . "$ROOT/bin/fm-wake-lib.sh"; fm_pid_identity "$sleeper" > "$state/.supervise-daemon.lock/pid-identity" ) \
+    || fail "could not record the fake away-daemon identity"
+
+  # shellcheck disable=SC2031 # reads the caller's resolved value; the subshell does not reassign it.
+  PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" \
+    FM_ARM_CONFIRM_TIMEOUT=2 "$WATCH_ARM" --restart > "$armout" 2>&1
+  status=$?
+  expect_code 0 "$status" "an arm must defer to a live daemon even with a stale sentinel"
+  grep -F 'watcher: deferred - away-mode daemon owns supervision' "$armout" >/dev/null \
+    || fail "stale sentinel with a live daemon did not defer: $(cat "$armout")"
+  # shellcheck disable=SC2031 # reads the caller's resolved value; the subshell does not reassign it.
+  [ -e "$state/.afk-launching" ] || fail "a stale sentinel was cleaned while a live daemon owned supervision"
+  is_live_non_zombie "$SEED_PID" || fail "arm displaced the daemon's watcher"
+
+  kill "$SEED_PID" 2>/dev/null || true
+  wait "$SEED_PID" 2>/dev/null || true
+  kill "$sleeper" 2>/dev/null || true
+  wait "$sleeper" 2>/dev/null || true
+  pass "watch-arm: a stale sentinel with a live daemon still defers"
+}
+
 test_attached_arm_reports_the_delivered_wake
 test_attached_arm_reports_the_delivered_wake_after_drain
 test_arm_refuses_an_unusable_launch_confirm_window
@@ -856,3 +1223,13 @@ test_markerless_legacy_queue_is_recovered_on_arm
 test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
 test_downtime_marker_does_not_follow_symlink
+test_arm_defers_to_a_live_away_daemon
+test_arm_defers_during_away_entry
+test_arm_defers_through_daemon_entry_window
+test_interrupted_away_entry_clears_marker_before_rearm
+test_interrupted_away_stop_clears_marker_before_rearm
+test_legacy_afk_without_daemon_or_entry_still_arms
+test_arm_defers_to_fresh_recorded_away_entry
+test_arm_self_heals_abandoned_away_entry
+test_arm_self_heal_respects_max_override
+test_arm_defers_to_stale_sentinel_with_live_daemon

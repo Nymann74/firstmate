@@ -152,6 +152,65 @@ EOF
   pass "Pi extension reports external healthy watcher output"
 }
 
+test_pi_extension_treats_away_daemon_deferral_as_benign() {
+  # While a live away-mode daemon owns supervision, fm-watch-arm.sh yields with
+  # a typed deferral line. The extension must treat that as a benign no-op: no
+  # retry, no delivered wake, no failure notice.
+  local repo home plugin out status
+  repo="$TMP_ROOT/pi-away-deferral-root"
+  home="$TMP_ROOT/pi-away-deferral-home"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'watcher: deferred - away-mode daemon owns supervision\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let handler = null;
+let notification = "";
+let prompt = "";
+const pi = {
+  on() {},
+  registerCommand(name, options) {
+    if (name === "fm-watch-arm-pi") handler = options.handler;
+  },
+  registerTool() {},
+  sendUserMessage: async (message) => {
+    prompt = message;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+if (!handler) {
+  console.error("Pi watch command was not registered");
+  process.exit(1);
+}
+await handler("", { ui: { notify(message) { notification = message; } } });
+for (let i = 0; i < 20 && !prompt; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (prompt) {
+  console.error(`away-daemon deferral wrongly delivered a wake: ${prompt}`);
+  process.exit(1);
+}
+if (!notification.includes("started Pi extension arm child")) {
+  console.error(notification);
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi extension must treat an away-mode daemon deferral as a benign no-op"
+  [ -z "$out" ] || fail "Pi away-daemon deferral test printed output: $out"
+  pass "Pi extension treats an away-mode daemon deferral as a benign no-op"
+}
+
 test_pi_tool_returns_agent_tool_result() {
   local repo home plugin out status
   repo="$TMP_ROOT/pi-tool-result-root"
@@ -423,6 +482,65 @@ EOF
   expect_code 0 "$status" "Pi actionable close must start one successor before wake delivery settles"
   [ -z "$out" ] || fail "Pi continuous-rearm test printed output: $out"
   pass "Pi actionable close starts one successor before wake delivery settles"
+}
+
+test_pi_actionable_close_hands_off_to_away_daemon() {
+  local repo home plugin log out status
+  repo="$TMP_ROOT/pi-away-handoff-root"
+  home="$TMP_ROOT/pi-away-handoff-home"
+  log="$TMP_ROOT/pi-away-handoff.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  install_pi_watch_extension_fixture "$repo"
+  plugin="$repo/.pi/extensions/fm-primary-pi-watch.ts"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: synthetic handoff wake\n'
+  exit 0
+fi
+printf 'watcher: deferred - away-mode daemon owns supervision\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node --input-type=module 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+let tool = null;
+let prompts = 0;
+const pi = {
+  on() {},
+  registerCommand() {},
+  registerTool(candidate) {
+    if (candidate.name === "fm_watch_arm_pi") tool = candidate;
+  },
+  sendUserMessage: async () => {
+    prompts += 1;
+  },
+};
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+mod.default(pi);
+await tool.execute("tool-call-away-handoff", {}, undefined, undefined, {});
+for (let i = 0; i < 200; i += 1) {
+  const rows = existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+    : [];
+  if (rows.length === 2) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 2) throw new Error(`expected one successor handoff, got ${rows.join(" | ")}`);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts !== 0) throw new Error(`away-daemon handoff delivered ${prompts} wake(s)`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "Pi must hand an actionable close to the away daemon without retrying or delivering it"
+  [ -z "$out" ] || fail "Pi away-daemon handoff test printed output: $out"
+  pass "Pi actionable close hands off to the away daemon without delivery"
 }
 
 test_pi_branch_offer_owns_actionable_wake() {
@@ -3760,6 +3878,164 @@ EOF
   pass "OpenCode established clean closes stop at the configured retry limit"
 }
 
+test_opencode_away_daemon_deferral_is_a_benign_noop() {
+  # A live away-mode daemon owns supervision and fm-watch-arm.sh yields with the
+  # typed deferral line. The plugin must neither retry nor deliver a wake.
+  local plugin repo home log out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-away-deferral-root"
+  home="$TMP_ROOT/opencode-away-deferral-home"
+  log="$TMP_ROOT/opencode-away-deferral.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: deferred - away-mode daemon owns supervision\n'
+exit 0
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompts = 0;
+const client = {
+  session: {
+    promptAsync: async () => {
+      prompts += 1;
+    },
+  },
+};
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+// Wait well past the retry base: a wrongly scheduled retry would append a row.
+for (let i = 0; i < 60; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+const rows = existsSync(process.env.FM_ARM_LOG)
+  ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+  : [];
+if (rows.length !== 1) throw new Error(`away-daemon deferral triggered a retry: ${rows.join(" | ")}`);
+if (prompts !== 0) throw new Error(`away-daemon deferral delivered ${prompts} wake(s)`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must treat an away-mode daemon deferral as a benign no-op"
+  [ -z "$out" ] || fail "OpenCode away-daemon deferral test printed output: $out"
+  pass "OpenCode treats an away-mode daemon deferral as a benign no-op"
+}
+
+test_opencode_legacy_afk_without_daemon_still_arms() {
+  local plugin repo home log stop out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-legacy-afk-root"
+  home="$TMP_ROOT/opencode-legacy-afk-home"
+  log="$TMP_ROOT/opencode-legacy-afk.log"
+  stop="$TMP_ROOT/opencode-legacy-afk.stop"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  : > "$home/state/.afk"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+while [ ! -e "${FM_STOP_FILE:?}" ]; do sleep 0.02; done
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_STOP_FILE="$stop" node 2>&1 <<'EOF'
+import { readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const hooks = await mod.FmPrimaryWatchArm({
+  client: { session: { promptAsync: async () => {} } },
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+const armed = await globalThis.__firstmateOpenCodeWatchArm.ensureArmed("session-test", {
+  session: { promptAsync: async () => {} },
+});
+if (armed !== "armed") throw new Error(`legacy .afk prevented an arm: ${armed}`);
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 1) throw new Error(`legacy .afk spawned ${rows.length} arm children`);
+writeFileSync(process.env.FM_STOP_FILE, "stop\n");
+void hooks;
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must arm when only a legacy .afk flag is present"
+  [ -z "$out" ] || fail "OpenCode legacy .afk test printed output: $out"
+  pass "OpenCode arms when a legacy .afk has no daemon handoff"
+}
+
+test_opencode_actionable_close_hands_off_to_away_daemon() {
+  local plugin repo home log out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-away-handoff-root"
+  home="$TMP_ROOT/opencode-away-handoff-home"
+  log="$TMP_ROOT/opencode-away-handoff.log"
+  mkdir -p "$repo/bin" "$home/state" "$home/config"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm=%s\n' "$$" >> "${FM_ARM_LOG:?}"
+count=$(wc -l < "$FM_ARM_LOG" | tr -d '[:space:]')
+if [ "$count" -eq 1 ]; then
+  : > "${FM_HOME:?}/state/.afk"
+  : > "${FM_HOME:?}/state/.afk-launching"
+  printf 'watcher: started pid=%s (beacon fresh)\n' "$$"
+  printf 'signal: OpenCode away handoff\n'
+  exit 0
+fi
+printf 'watcher: deferred - away-mode daemon owns supervision\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  out=$(PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" FM_WATCH_REARM_RETRY_BASE_MS=5 FM_WATCH_REARM_RETRY_MAX_MS=10 FM_WATCH_REARM_RETRY_LIMIT=2 node 2>&1 <<'EOF'
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+let prompts = 0;
+const hooks = await mod.FmPrimaryWatchArm({
+  client: { session: { promptAsync: async () => { prompts += 1; } } },
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
+for (let i = 0; i < 200; i += 1) {
+  const rows = existsSync(process.env.FM_ARM_LOG)
+    ? readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n")
+    : [];
+  if (rows.length === 2) break;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+}
+const rows = readFileSync(process.env.FM_ARM_LOG, "utf8").trim().split("\n");
+if (rows.length !== 2) throw new Error(`expected one successor handoff, got ${rows.join(" | ")}`);
+await new Promise((resolve) => setTimeout(resolve, 100));
+if (prompts !== 0) throw new Error(`away-daemon handoff delivered ${prompts} wake(s)`);
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "OpenCode must hand an actionable close to the away daemon without retrying or delivering it"
+  [ -z "$out" ] || fail "OpenCode away-daemon handoff test printed output: $out"
+  pass "OpenCode actionable close hands off to the away daemon without delivery"
+}
+
 test_opencode_actionable_close_rechecks_session_lock() {
   local plugin repo home log release out status
   plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
@@ -3976,10 +4252,12 @@ EOF
 }
 
 test_pi_extension_reports_external_healthy_watcher
+test_pi_extension_treats_away_daemon_deferral_as_benign
 test_pi_tool_returns_agent_tool_result
 test_pi_redundant_tool_call_is_owned_noop
 test_pi_scheduled_retry_call_is_owned_noop
 test_pi_actionable_close_starts_single_successor_before_delivery
+test_pi_actionable_close_hands_off_to_away_daemon
 test_pi_branch_offer_owns_actionable_wake
 test_pi_branch_offer_flags_heartbeat
 test_pi_heartbeat_is_not_ridden_into_main_by_a_co_present_check
@@ -4020,6 +4298,9 @@ test_opencode_unretired_successor_falls_back_without_retry
 test_opencode_late_unretired_close_resumes_supervision
 test_opencode_empty_close_retries_instead_of_disappearing
 test_opencode_established_empty_close_honors_retry_limit
+test_opencode_away_daemon_deferral_is_a_benign_noop
+test_opencode_legacy_afk_without_daemon_still_arms
+test_opencode_actionable_close_hands_off_to_away_daemon
 test_opencode_actionable_close_rechecks_session_lock
 test_opencode_watch_arm_coordinates_with_turnend_guard
 test_opencode_healthy_arm_output_does_not_suppress_guard

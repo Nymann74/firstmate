@@ -3178,7 +3178,10 @@ fm_backend_herdr_rendered_busy_state() {  # <target> [harness] -> busy|idle|unkn
 # supplies the busy primitive.
 # Echoes empty|pending|unknown|send-failed, a subset of the proof-carrying
 # submit vocabulary. Empty means confirmed submitted for every backend; how
-# each backend confirms it is an internal decision.
+# each backend confirms it is an internal decision. send-failed proves the
+# literal text never landed (pre-typing); a literal send that succeeded but
+# whose Enter transport never reached the pane is reported as pending, because
+# the text is in the composer and the submit is unconfirmed, not absent.
 #
 # fm_backend_herdr_queued_enter_busy: delivery-busy for the shared queued-Enter
 # conversion. Native agent_status=working is generating; blocked is not (a
@@ -3221,7 +3224,11 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     elif [ "$enter_sent" -eq 0 ]; then
       i=$((i + 1))
       if [ "$i" -ge "$retries" ]; then
-        printf 'send-failed'
+        # The literal text was already typed; only the Enter transport failed.
+        # Report the composer verdict (pending: the text is still there and the
+        # submit is unconfirmed) rather than send-failed, which proves nothing
+        # was typed. Callers require exact empty for delivery either way.
+        printf 'pending'
         return 0
       fi
       sleep "$sleep_s"
@@ -3259,7 +3266,10 @@ fm_backend_herdr_send_text_submit() {  # <target> <text> <retries> <enter-sleep>
     i=$((i + 1))
     if [ "$i" -ge "$retries" ]; then
       if [ "$enter_sent" -eq 0 ]; then
-        printf 'send-failed'
+        # The literal text was typed; Enter never reached the pane. pending =
+        # text present, submit unconfirmed (never send-failed, which would
+        # falsely prove that nothing was typed).
+        printf 'pending'
       else
         fm_composer_queued_enter_verdict "$verdict" \
           "$(fm_backend_herdr_queued_enter_busy "$target" "$allow_rendered")"

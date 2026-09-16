@@ -2174,6 +2174,311 @@ test_max_defer_afk_inactive_does_not_flush_or_alarm() {
   pass "max-defer does not flush or alarm while afk is inactive"
 }
 
+# --- bounded submit retry (2026-09-10 duplicate-escalation incident) --------
+# An unconfirmed submit against the Pi captain pane used to re-type and
+# re-submit the same buffered digest on every tick. These drive escalate_flush
+# through backend stubs that type but never confirm, and assert the typed
+# attempts are bounded and the wedge alarm fires instead of retyping.
+make_retry_case() {  # <name> -> echoes dir; state + submits.log
+  local name=$1 dir
+  dir=$(make_supercase "$name")
+  : > "$dir/submits.log"
+  printf '%s\n' "$dir"
+}
+
+# Shared stub set for a herdr pane that is safe to type into but never confirms.
+run_unconfirmed_flush() {  # <dir> <state> <flushes> <cap> <window> [verdict]
+  local dir=$1 state=$2 flushes=$3 cap=$4 window=$5 verdict=${6:-unknown} i
+  local calls="$dir/submits.log"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf 'typed\n' >> "$calls"; printf '%s' "$verdict"; }
+    i=0
+    while [ "$i" -lt "$flushes" ]; do
+      i=$((i + 1))
+      FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+        FM_ESCALATE_SUBMIT_MAX_ATTEMPTS="$cap" FM_ESCALATE_SUBMIT_INFLIGHT_SECS="$window" \
+        escalate_flush "$state" >/dev/null 2>&1 || true
+    done
+  )
+}
+
+test_escalate_flush_caps_identical_digest_attempts_and_alarms() {
+  local dir state typed
+  dir=$(make_retry_case bounded-retry-cap)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: pick A"
+  afk_enter "$state"
+  run_unconfirmed_flush "$dir" "$state" 5 2 0
+  typed=$(wc -l < "$dir/submits.log" | tr -d ' ')
+  [ "$typed" -eq 2 ] || fail "identical digest typed $typed times; expected the cap of 2"
+  [ -s "$state/.subsuper-escalations" ] || fail "capped digest buffer was dropped instead of preserved"
+  [ -s "$state/.subsuper-inject-wedged" ] || fail "cap did not raise the wedge alarm marker"
+  pass "escalate_flush: an unconfirmed identical digest is typed at most the cap, then alarms"
+}
+
+# A literal send that succeeded but whose Enter transport never reached the pane
+# must be bounded like any other typed attempt, never mistaken for a deferral.
+test_escalate_flush_posttyping_enter_failure_counts_attempts() {
+  local dir state typed
+  dir=$(make_retry_case bounded-retry-enter-failure)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: pick F"
+  afk_enter "$state"
+  run_unconfirmed_flush "$dir" "$state" 5 2 0 pending
+  typed=$(wc -l < "$dir/submits.log" | tr -d ' ')
+  [ "$typed" -eq 2 ] || fail "a post-literal Enter failure was typed $typed times; expected the cap of 2"
+  [ -s "$state/.subsuper-escalations" ] || fail "post-literal Enter-failure buffer was dropped"
+  [ -s "$state/.subsuper-inject-wedged" ] || fail "post-literal Enter failure did not reach the cap and alarm"
+  pass "escalate_flush: a post-literal Enter failure is bounded like any typed attempt"
+}
+
+test_escalate_flush_suppresses_retype_while_attempt_is_in_flight() {
+  local dir state typed
+  dir=$(make_retry_case bounded-retry-inflight)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: pick B"
+  afk_enter "$state"
+  run_unconfirmed_flush "$dir" "$state" 3 9 9999
+  typed=$(wc -l < "$dir/submits.log" | tr -d ' ')
+  [ "$typed" -eq 1 ] || fail "an in-flight unconfirmed digest was re-typed $typed times; expected 1"
+  [ -s "$state/.subsuper-escalations" ] || fail "in-flight digest buffer was dropped"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "in-flight suppression wrongly raised the wedge alarm"
+  pass "escalate_flush: an unconfirmed digest is not re-typed while its attempt may be in flight"
+}
+
+test_escalate_flush_changed_buffer_resets_the_attempt_bound() {
+  local dir state typed
+  dir=$(make_retry_case bounded-retry-newevent)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: pick C"
+  afk_enter "$state"
+  # Cap of 1: the first flush types once and blocks the identical digest.
+  run_unconfirmed_flush "$dir" "$state" 2 1 0
+  typed=$(wc -l < "$dir/submits.log" | tr -d ' ')
+  [ "$typed" -eq 1 ] || fail "cap of 1 typed the identical digest $typed times"
+  # A genuinely new escalation is a new identity, so it is never blocked by the
+  # previous digest's cap.
+  escalate_add "$state" "failed: a new captain-relevant event"
+  run_unconfirmed_flush "$dir" "$state" 1 1 0
+  typed=$(wc -l < "$dir/submits.log" | tr -d ' ')
+  [ "$typed" -eq 2 ] || fail "a changed buffer was wrongly blocked by the prior digest's cap (typed=$typed)"
+  pass "escalate_flush: a changed buffer is a new identity and is never blocked by the prior cap"
+}
+
+# A proven pre-typing transport failure (the backend's send-failed verdict)
+# means the literal text never landed, so it is a deferral, not a typed attempt.
+run_transport_failed_flush() {  # <dir> <state> <flushes> <cap>
+  local dir=$1 state=$2 flushes=$3 cap=$4 i
+  local calls="$dir/submits.log"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf 'transport\n' >> "$calls"; printf 'send-failed'; }
+    i=0
+    while [ "$i" -lt "$flushes" ]; do
+      i=$((i + 1))
+      FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+        FM_ESCALATE_SUBMIT_MAX_ATTEMPTS="$cap" FM_ESCALATE_SUBMIT_INFLIGHT_SECS=0 \
+        escalate_flush "$state" >/dev/null 2>&1 || true
+    done
+  )
+}
+
+test_escalate_flush_prettyping_send_failure_consumes_no_attempt_budget() {
+  local dir state sent
+  dir=$(make_retry_case bounded-retry-prefailure)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: pick D"
+  afk_enter "$state"
+  # More flushes than the cap: a proven pre-typing failure must consume no
+  # budget, so the transport is invoked every time and nothing is capped away.
+  run_transport_failed_flush "$dir" "$state" 4 1
+  sent=$(wc -l < "$dir/submits.log" | tr -d ' ')
+  [ "$sent" -eq 4 ] || fail "pre-typing send failures consumed attempt budget (transport invoked $sent times, expected 4)"
+  [ ! -e "$state/.subsuper-escalations.attempt" ] || fail "a pre-typing send failure left an attempt claim"
+  [ ! -e "$state/.subsuper-inject-wedged" ] || fail "a pre-typing send failure wrongly raised the wedge alarm"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer was dropped after pre-typing send failures"
+  pass "escalate_flush: a proven pre-typing send failure consumes no attempt budget"
+}
+
+# The attempt count must be durable before the irreversible type, so a TERM
+# between the type and a later persist cannot lose it and exceed the cap.
+# The stub snapshots the record from inside the backend invocation itself.
+test_escalate_flush_durably_claims_attempt_before_typing() {
+  local dir state snapshot recorded
+  dir=$(make_retry_case bounded-retry-claim-before-type)
+  state="$dir/state"
+  snapshot="$dir/attempt-at-type"
+  escalate_add "$state" "needs-decision: pick E"
+  afk_enter "$state"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() {
+      cp "$state/.subsuper-escalations.attempt" "$snapshot" 2>/dev/null || true
+      printf 'unknown'
+    }
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+      FM_ESCALATE_SUBMIT_MAX_ATTEMPTS=3 FM_ESCALATE_SUBMIT_INFLIGHT_SECS=0 \
+      escalate_flush "$state" >/dev/null 2>&1 || true
+  )
+  recorded=$(awk -F'\t' '{print $2}' "$snapshot" 2>/dev/null)
+  [ "$recorded" = 1 ] || fail "attempt was not durably claimed before the type (record at type: ${recorded:-none})"
+  recorded=$(awk -F'\t' '{print $2}' "$state/.subsuper-escalations.attempt" 2>/dev/null)
+  [ "$recorded" = 1 ] || fail "typed-but-unconfirmed attempt count was not persisted (${recorded:-none})"
+  pass "escalate_flush: the attempt is durably claimed before the irreversible type"
+}
+
+# If the attempt claim cannot be recorded, the daemon must not type: an
+# unbounded typed submit is worse than a deferred, preserved escalation.
+test_escalate_flush_unrecordable_claim_fails_closed() {
+  local dir state
+  dir=$(make_retry_case bounded-retry-unrecordable)
+  state="$dir/state"
+  escalate_add "$state" "needs-decision: pick G"
+  afk_enter "$state"
+  # Occupy the attempt-record path with a directory so the atomic rename cannot
+  # produce a verifiable record.
+  mkdir -p "$state/.subsuper-escalations.attempt"
+  (
+    fm_backend_target_exists() { return 0; }
+    pane_is_busy() { return 1; }
+    fm_backend_composer_state() { printf 'empty'; }
+    fm_backend_send_text_submit() { printf 'typed\n' >> "$dir/submits.log"; printf 'empty'; }
+    FM_SUPERVISOR_BACKEND=herdr FM_SUPERVISOR_TARGET="default:w1:p2" \
+      FM_ESCALATE_SUBMIT_MAX_ATTEMPTS=3 FM_ESCALATE_SUBMIT_INFLIGHT_SECS=0 \
+      escalate_flush "$state" >/dev/null 2>&1 || true
+  )
+  [ ! -s "$dir/submits.log" ] || fail "an unrecordable attempt claim still typed the digest"
+  [ -s "$state/.subsuper-escalations" ] || fail "buffer was dropped when the claim could not be recorded"
+  pass "escalate_flush: an unrecordable attempt claim fails closed without typing"
+}
+
+# --- away-entry watcher retirement (2026-09-10 collision incident) ----------
+# If an extension arm's watcher is already live when /afk is entered, the daemon
+# must retire that home watcher before it forks its own child; otherwise the two
+# collide on the singleton lock and per-wake triage stays down until the old
+# watcher happens to wake. These drive the daemon's home-scoped, identity-matched
+# retire primitive against real live processes.
+write_home_watch_lock() {  # <state> <pid> <home> <watch-path> [identity-override]
+  local state=$1 pid=$2 home=$3 watch=$4 identity=${5:-}
+  [ -n "$identity" ] || identity=$(fm_test_pid_identity "$pid") || return 1
+  mkdir -p "$state/.watch.lock"
+  printf '%s\n' "$pid" > "$state/.watch.lock/pid"
+  printf '%s\n' "$home" > "$state/.watch.lock/fm-home"
+  printf '%s\n' "$watch" > "$state/.watch.lock/watcher-path"
+  printf '%s\n' "$identity" > "$state/.watch.lock/pid-identity"
+}
+
+run_daemon_retire() {  # <state> <watch-path> <home> [own-child-pid]
+  local state=$1 watch=$2 home=$3 own=${4:-}
+  (
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_daemon_retire_pre_existing_watcher "$state" "$watch" "$home" "$own"
+  )
+}
+
+run_daemon_take_over() {  # <state> <watch-path> <home> [own-child-pid] [tmpdir]
+  local state=$1 watch=$2 home=$3 own=${4:-} tmpdir=${5:-${TMPDIR:-/tmp}}
+  (
+    # shellcheck source=bin/fm-wake-lib.sh
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_daemon_take_over_watcher_output "$state" "$watch" "$home" "$own" "$tmpdir"
+  )
+}
+
+test_daemon_retires_preexisting_identity_matched_home_watcher() {
+  local dir state home watch pid
+  dir=$(make_supercase daemon-retire-matched)
+  state="$dir/state"; home="$dir/home"; watch="$dir/bin/fm-watch.sh"
+  sleep 300 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  pid=$!
+  write_home_watch_lock "$state" "$pid" "$home" "$watch"
+
+  run_daemon_retire "$state" "$watch" "$home"
+  local rc=$?
+  wait "$pid" 2>/dev/null || true
+  [ "$rc" -eq 0 ] || fail "the retire primitive returned $rc for a matched home watcher"
+  is_live_non_zombie "$pid" && fail "the matched home watcher was not retired"
+  pass "daemon: a live identity-matched home watcher is retired before the daemon forks its own"
+}
+
+test_daemon_retire_leaves_foreign_or_unmatched_watcher_untouched() {
+  local dir state home watch pid
+  dir=$(make_supercase daemon-retire-unmatched)
+  state="$dir/state"; home="$dir/home"; watch="$dir/bin/fm-watch.sh"
+
+  sleep 300 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  pid=$!
+  write_home_watch_lock "$state" "$pid" "$dir/other-home" "$watch"
+  run_daemon_retire "$state" "$watch" "$home"
+  is_live_non_zombie "$pid" || fail "a watcher recorded for another home was signalled"
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+
+  sleep 300 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  pid=$!
+  write_home_watch_lock "$state" "$pid" "$home" "$dir/other/fm-watch.sh"
+  run_daemon_retire "$state" "$watch" "$home"
+  is_live_non_zombie "$pid" || fail "a watcher recorded for another watcher path was signalled"
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+
+  sleep 300 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  pid=$!
+  write_home_watch_lock "$state" "$pid" "$home" "$watch" "identity-that-cannot-match"
+  run_daemon_retire "$state" "$watch" "$home"
+  is_live_non_zombie "$pid" || fail "a watcher whose identity does not match the lock was signalled"
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+
+  pass "daemon: foreign, path-mismatched, and identity-mismatched watchers are never signalled"
+}
+
+test_daemon_retire_never_signals_its_own_watcher_child() {
+  local dir state home watch pid
+  dir=$(make_supercase daemon-retire-own-child)
+  state="$dir/state"; home="$dir/home"; watch="$dir/bin/fm-watch.sh"
+  sleep 300 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  pid=$!
+  write_home_watch_lock "$state" "$pid" "$home" "$watch"
+
+  run_daemon_retire "$state" "$watch" "$home" "$pid"
+  is_live_non_zombie "$pid" || fail "the daemon's own watcher child was signalled"
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+  pass "daemon: the daemon's own watcher child is never signalled by retirement"
+}
+
+# Child-launch prerequisites gate the takeover: if the watcher output file
+# cannot be allocated, no existing watcher may be retired, or the home would be
+# left with no watcher at all (the daemon keeps running, so extension arms
+# benignly defer).
+test_daemon_unavailable_tmpdir_keeps_existing_watcher() {
+  local dir state home watch pid tmpdir out rc
+  dir=$(make_supercase daemon-takeover-tmpdir-unavailable)
+  state="$dir/state"; home="$dir/home"; watch="$dir/bin/fm-watch.sh"
+  tmpdir="$dir/absent-tmpdir"
+  sleep 300 &
+  # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
+  pid=$!
+  write_home_watch_lock "$state" "$pid" "$home" "$watch"
+
+  out=$(run_daemon_take_over "$state" "$watch" "$home" "" "$tmpdir"); rc=$?
+  [ "$rc" -ne 0 ] || fail "watcher take-over should fail when the output temp dir is unavailable"
+  [ -z "$out" ] || fail "watcher take-over echoed a path despite the temp dir being unavailable"
+  is_live_non_zombie "$pid" || fail "an unavailable TMPDIR retired the existing home watcher"
+  kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+  pass "daemon: an unavailable TMPDIR fails the take-over before retiring the existing watcher"
+}
+
 # --- backend-independent active wedge alert ---------------------------------
 # These cover the 2026-07-10 overnight-incident fix: the max-defer wedge alarm's
 # ACTIVE alert channel must reach the captain even when the wedged pane and its
@@ -2457,6 +2762,7 @@ test_wedge_alarm_shutdown_stops_active_notifier_group() {
   (
     set -m
     sh -c 'sleep 30 & printf "%s" "$!" > "$1"; wait' sh "$child_file" &
+    # shellcheck disable=SC2031 # The background PID is captured immediately in this shell.
     pid=$!
     while [ ! -s "$child_file" ]; do sleep 0.05; done
     child=$(cat "$child_file")
@@ -2872,6 +3178,17 @@ test_max_defer_pending_composer_alarms_without_typing
 test_normal_flush_clears_stale_wedge_marker
 test_below_max_defer_does_nothing
 test_max_defer_afk_inactive_does_not_flush_or_alarm
+test_escalate_flush_caps_identical_digest_attempts_and_alarms
+test_escalate_flush_posttyping_enter_failure_counts_attempts
+test_escalate_flush_suppresses_retype_while_attempt_is_in_flight
+test_escalate_flush_changed_buffer_resets_the_attempt_bound
+test_escalate_flush_prettyping_send_failure_consumes_no_attempt_budget
+test_escalate_flush_durably_claims_attempt_before_typing
+test_escalate_flush_unrecordable_claim_fails_closed
+test_daemon_retires_preexisting_identity_matched_home_watcher
+test_daemon_retire_leaves_foreign_or_unmatched_watcher_untouched
+test_daemon_retire_never_signals_its_own_watcher_child
+test_daemon_unavailable_tmpdir_keeps_existing_watcher
 test_wedge_alarm_library_mode_defaults_to_discard
 test_wake_helpers_replace_inherited_notifier_override
 test_wedge_alarm_discard_seam_fires_nothing

@@ -92,7 +92,6 @@ function effectivePaths(root) {
 }
 
 function shouldArm(paths) {
-  if (existsSync(`${paths.state}/.afk`)) return false;
   if (existsSync(`${paths.config}/x-mode.env`)) return true;
   try {
     return readdirSync(paths.state).some((name) => name.endsWith(".meta"));
@@ -124,6 +123,12 @@ function classifyArmClose(stdout, stderr, code, signal) {
   const combined = `${stdout}\n${stderr}`;
   const reason = combined.split(/\r?\n/).find((line) => /^(signal:|stale:|check:|heartbeat($|:))/.test(line));
   if (reason) return { kind: "actionable", message: reason };
+  // A live away-mode daemon owns this home's watcher singleton; fm-watch-arm.sh
+  // yielded without starting or stopping a watcher. Benign no-op: do not retry,
+  // surface, or deliver anything. The daemon owns supervision until state/.afk
+  // clears.
+  const deferred = combined.split(/\r?\n/).find((line) => /^watcher: deferred\b/.test(line));
+  if (deferred) return { kind: "deferred", message: deferred };
   const healthy = combined.split(/\r?\n/).find((line) => /^watcher: healthy\b/.test(line));
   if (healthy) {
     return {
@@ -161,6 +166,11 @@ function observeArmOutput(stdout, stderr, settleReadiness) {
   if (combined.split(/\r?\n/).some((line) => /^watcher: (?:started|attached)\b/.test(line))) {
     setArmStatus("armed");
     settleReadiness("armed");
+    return;
+  }
+  if (combined.split(/\r?\n/).some((line) => /^watcher: deferred\b/.test(line))) {
+    setArmStatus("deferred");
+    settleReadiness("deferred");
     return;
   }
   if (combined.split(/\r?\n/).some((line) => /^watcher: healthy\b/.test(line))) {
@@ -282,6 +292,7 @@ async function restoreAfterActionableClose(paths, sessionID, client, predecessor
   for (let attempt = 0; attempt <= REARM_RETRY_LIMIT; attempt += 1) {
     const { status, armChild } = await ensureArm(paths, sessionID, client, predecessorArmPid, true);
     if (status === "armed") return { failure: "", recovery: armRecovery.get(armChild) };
+    if (status === "deferred") return { failure: "", handoff: true };
     // An actionable line belongs to this arm's close handler.
     // Do not retire it before that handler can start the successor cycle.
     if (status === "wake") return { failure: "", recovery: armRecovery.get(armChild) };
@@ -315,7 +326,7 @@ async function scheduleRetry(paths, sessionID, client, reason, predecessorArmPid
   const timer = setTimeout(() => {
     if (retryTimer === timer) retryTimer = null;
     void ensureArm(paths, sessionID, client, predecessorArmPid).then((status) => {
-      if (["armed", "starting", "wake"].includes(status)) return;
+      if (["armed", "starting", "wake", "deferred"].includes(status)) return;
       surfaceFailure(paths, client, sessionID, `watcher: FAILED - OpenCode could not launch a continuity retry (${status})`);
     });
   }, retryDelay(retryFailures));
@@ -380,7 +391,9 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
     resolveClosed();
     releaseChild();
     const classification = classifyArmClose(stdout, stderr, code, signal);
-    settleReadiness(classification.kind === "actionable" ? "wake" : "failed");
+    settleReadiness(
+      classification.kind === "actionable" ? "wake" : classification.kind === "deferred" ? "deferred" : "failed",
+    );
     const predecessor = String(armChild.pid ?? "");
     if (classification.kind === "actionable") {
       if (restorationInFlight) return;
@@ -390,6 +403,7 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
       restorationInFlight = restoration;
       void restoration.then(async (result) => {
         try {
+          if (result.handoff) return;
           const message = result.failure ? `${classification.message}\n\n${result.failure}` : classification.message;
           await deliverActionableWake(paths, client, sessionID, message, result.recovery);
         } finally {
@@ -404,6 +418,13 @@ function spawnArm(paths, sessionID, client, predecessorArmPid = "") {
           `watcher: FAILED - OpenCode could not deliver an actionable wake\n${String(error?.message ?? error)}`,
         );
       });
+      return;
+    }
+    // Away-mode daemon owns supervision: the arm yielded and the daemon's own
+    // watcher serves the home. Nothing to restore or retry; a later arm trigger
+    // re-checks after state/.afk clears.
+    if (classification.kind === "deferred") {
+      setArmStatus("deferred");
       return;
     }
     if (restorationInFlight) {
